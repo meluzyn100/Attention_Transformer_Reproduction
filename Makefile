@@ -10,6 +10,11 @@ help:
 	@echo "  act      Run the GitHub Actions workflow locally with act"
 	@echo "  clean    Remove common cache/build artifacts"
 
+
+download-data:
+	@echo "Downloading WMT14 de-en raw data..."
+	python scripts/download_data.py --output-dir data/raw/wmt14_de_en
+
 install:
 	python -m pip install -e '.[dev]'
 
