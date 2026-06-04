@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Download and write WMT14 de-en raw data using HuggingFace datasets.
-
-This replaces the previous shell wrapper that embedded Python.
-"""
-
-from __future__ import annotations
+"""Download WMT14 de-en raw data using Hugging Face Datasets."""
 
 import argparse
 import json
