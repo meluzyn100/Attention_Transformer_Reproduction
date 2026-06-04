@@ -34,5 +34,6 @@ jobs:
 
       - name: Run pytest
         env:
-          PYTHONWARNINGS: "ignore::DeprecationWarning"
+          PYTHONWARNINGS: "ignore::DeprecationWarning" 
+          HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python -m pytest
