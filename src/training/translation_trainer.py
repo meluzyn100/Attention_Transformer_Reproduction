@@ -5,7 +5,6 @@ Extends the generic Trainer by handling:
 - Mask creation (src padding mask + tgt causal mask)
 - Correct model.forward(**kwargs) dispatch
 """
-from __future__ import annotations
 
 from typing import Any
 

@@ -4,6 +4,7 @@ hydra-core>=1.3
 tqdm>=4.0
 datasets>=4.0
 tokenizers>=0.22
+mlflow>=3.0
 
 # Dev / testing / formatting
 pytest>=7.0

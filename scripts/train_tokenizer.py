@@ -4,7 +4,6 @@
 Writes `bpe_vocab.json` and `bpe_merges.txt` to the output directory.
 """
 
-from __future__ import annotations
 
 import sys
 import argparse

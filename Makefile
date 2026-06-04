@@ -1,8 +1,14 @@
-.PHONY: help install lint format test ci act clean
+.PHONY: help install lint format test ci act clean download-data train-tokenizer train smoke train-mlflow mlflow-ui
 
 help:
 	@echo "Targets:"
 	@echo "  install  Install project dependencies in editable mode"
+	@echo "  download-data  Download raw WMT14 de-en data"
+	@echo "  train-tokenizer  Train the shared BPE tokenizer"
+	@echo "  train    Run the default training config"
+	@echo "  smoke    Run the smoke-test config"
+	@echo "  train-mlflow  Run training with MLflow enabled"
+	@echo "  mlflow-ui  Start the local MLflow UI on port 5000"
 	@echo "  lint     Run ruff"
 	@echo "  format   Run black"
 	@echo "  test     Run pytest"
@@ -21,6 +27,15 @@ train-tokenizer:
 
 install:
 	python -m pip install -e '.[dev]'
+
+train:
+	python train.py
+
+smoke:
+	python train.py --config-name smoke
+
+mlflow-ui:
+	mlflow ui --backend-store-uri sqlite:///runs/mlflow/mlflow.db --port 5000
 
 lint:
 	python -m ruff check src tests

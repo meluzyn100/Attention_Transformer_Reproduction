@@ -55,10 +55,13 @@ training:
 
 # ---- MLflow -----------------------------------------------
 mlflow:
-  enabled: false
-  tracking_uri: null
+  enabled: true
+  base_dir: runs/mlflow
+  tracking_uri: null          # defaults to local sqlite in ${mlflow.base_dir}
   experiment_name: attention_transformer
   run_name: null
+  log_checkpoints: true
+  tags: {}
 
 # ---- Smoke test -------------------------------------------
 # python train.py smoke.enabled=true
