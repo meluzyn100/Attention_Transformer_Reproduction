@@ -21,7 +21,7 @@ pytest.importorskip("datasets")
 def test_wmt14_data_pipeline_round_trip(tmp_path):
     from datasets import load_dataset
 
-    split = load_dataset("wmt14", "de-en", split="train[:100]")
+    split = load_dataset("wmt/wmt14", "de-en", split="train[:100]")
 
     source_texts = [normalize_text(example["translation"]["de"]) for example in split]
     target_texts = [normalize_text(example["translation"]["en"]) for example in split]

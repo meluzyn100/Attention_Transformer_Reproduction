@@ -28,7 +28,7 @@ def save_split(split, out_dir: Path, split_name: str) -> None:
 def download_wmt14(output_dir: Path, splits: Iterable[str]) -> None:
     from datasets import load_dataset
 
-    dataset = load_dataset("wmt14", "de-en")
+    dataset = load_dataset("wmt/wmt14", "de-en")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
