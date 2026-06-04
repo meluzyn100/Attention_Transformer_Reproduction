@@ -1,0 +1,35 @@
+# ── Smoke test override ───────────────────────────────────────────────────────
+# Usage: python train.py --config-name smoke
+# Inherits everything from train.yaml and overrides only smoke-related keys.
+
+defaults:
+  - train
+  - _self_
+
+model:
+  d_model: 128
+  num_layers: 2
+  h: 4
+  d_ff: 256
+  dropout: 0.0
+
+training:
+  label_smoothing: 0.0
+  device: cpu
+  seed: 42
+  checkpoint_dir: checkpoints
+
+smoke:
+  enabled: true
+  steps: 50
+  checkpoint_path: checkpoints/smoke.pt
+
+scheduler:
+  use_noam: true
+  d_model: ${model.d_model}
+  warmup_steps: 10
+
+data:
+  max_train_samples: 100
+  batch_size: 4
+  num_workers: 0
