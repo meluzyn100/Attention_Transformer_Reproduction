@@ -33,4 +33,7 @@ jobs:
         run: python -m ruff check src tests
 
       - name: Run pytest
+        env:
+          PYTHONWARNINGS: "ignore::DeprecationWarning" 
+          HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python -m pytest
