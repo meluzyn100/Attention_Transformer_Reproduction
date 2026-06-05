@@ -12,9 +12,9 @@ model:
   d_model: 512
   num_layers: 6
   h: 8
-  d_ff: 2048
+  d_ff: 1024
   dropout: 0.1
-  max_len: 512
+  max_len: 1024
 
 # ---- Data -------------------------------------------------
 data:
@@ -22,10 +22,14 @@ data:
   val_jsonl: data/raw/wmt14_de_en/validation.jsonl
   tokenizer_vocab: data/processed/bpe/bpe_vocab.json
   tokenizer_merges: data/processed/bpe/bpe_merges.txt
-  batch_size: 32
+  batch_size: 12
   num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  multiprocessing_context: spawn
+  prefetch_factor: 2
   # Optional: limit training set size (null = use all data)
-  max_train_samples: null
+  max_train_samples: 500000
 
 # ---- Optimizer --------------------------------------------
 optimizer:
@@ -38,17 +42,24 @@ optimizer:
 scheduler:
   use_noam: true
   d_model: ${model.d_model}   # interpolated from model section
-  warmup_steps: 4000
+  warmup_steps: 20000
+  lr_scale: 0.5
 
 # ---- Training loop ----------------------------------------
 training:
-  epochs: 10
+  epochs: 15
   label_smoothing: 0.1
   ignore_index: 0              # PAD_ID
   device: cuda                 # or "cpu"
-  grad_clip_norm: null         # set e.g. 1.0 to enable gradient clipping
+  use_amp: true
+  grad_clip_norm: 0.5
+  max_skipped_steps_per_epoch: 500
+  # skip_backoff_trigger: 20
+  skip_backoff_trigger: 500
+  skip_backoff_factor: 0.5
+  min_lr: 1.0e-6
   checkpoint_dir: checkpoints
-  log_every: 100               # print every N optimizer steps
+  log_every: 500                # print every N optimizer steps
   validate_every: 1            # validate every N epochs
   save_every: 1                # save checkpoint every N epochs
   seed: 42

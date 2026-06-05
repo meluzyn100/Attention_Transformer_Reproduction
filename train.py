@@ -10,6 +10,8 @@ Usage:
 import json
 import random
 import gc
+import os
+import math
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,9 @@ from src.training import (
     get_noam_scheduler,
 )
 from src.training.translation_trainer import TranslationTrainer
+
+# Avoid known tokenizers+fork interaction that can stall worker processes.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +91,10 @@ def _load_jsonl(path: str | Path, max_samples: int | None = None) -> tuple[list[
 def _build_dataloaders(cfg: DictConfig, tokenizer: SharedBPETokenizer) -> tuple[DataLoader, DataLoader | None]:
     batch_size = int(cfg.data.batch_size)
     num_workers = int(cfg.data.num_workers)
+    pin_memory = bool(cfg.data.pin_memory)
+    persistent_workers = bool(cfg.data.persistent_workers) and num_workers > 0
+    multiprocessing_context = cfg.data.multiprocessing_context if num_workers > 0 else None
+    prefetch_factor = int(cfg.data.prefetch_factor) if num_workers > 0 else None
     max_train = cfg.data.max_train_samples
     if max_train is not None:
         max_train = int(max_train)
@@ -93,14 +102,17 @@ def _build_dataloaders(cfg: DictConfig, tokenizer: SharedBPETokenizer) -> tuple[
     train_src, train_tgt = _load_jsonl(cfg.data.train_jsonl, max_samples=max_train)
     train_ds = TranslationDataset(train_src, train_tgt, tokenizer)
 
-    _collate = partial(collate_fn, pad_id=tokenizer.pad_id)
+    _collate = partial(collate_fn, pad_id=tokenizer.pad_id, max_length=cfg.model.max_len)
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         collate_fn=_collate,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        multiprocessing_context=multiprocessing_context,
+        prefetch_factor=prefetch_factor,
     )
 
     val_loader = None
@@ -114,7 +126,10 @@ def _build_dataloaders(cfg: DictConfig, tokenizer: SharedBPETokenizer) -> tuple[
             shuffle=False,
             num_workers=num_workers,
             collate_fn=_collate,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            multiprocessing_context=multiprocessing_context,
+            prefetch_factor=prefetch_factor,
         )
 
     return train_loader, val_loader
@@ -145,7 +160,13 @@ def _build_trainer(
     if bool(cfg.scheduler.use_noam):
         d_model = int(cfg.scheduler.d_model)
         warmup = int(cfg.scheduler.warmup_steps)
-        scheduler = get_noam_scheduler(optimizer, d_model=d_model, warmup_steps=warmup)
+        lr_scale = float(cfg.scheduler.lr_scale)
+        scheduler = get_noam_scheduler(
+            optimizer,
+            d_model=d_model,
+            warmup_steps=warmup,
+            lr_scale=lr_scale,
+        )
 
     device = cfg.training.device
     grad_clip = cfg.training.grad_clip_norm
@@ -157,6 +178,7 @@ def _build_trainer(
         scheduler=scheduler,
         device=device,
         grad_clip_norm=float(grad_clip) if grad_clip is not None else None,
+        use_amp=bool(cfg.training.use_amp),
         use_mlflow=bool(cfg.mlflow.enabled),
     )
 
@@ -235,11 +257,15 @@ def _run_smoke_test(
     cfg: DictConfig,
 ) -> None:
     smoke_steps = int(cfg.smoke.steps)
-    batch = next(iter(train_loader))
+    batch = next((item for item in train_loader if item is not None), None)
+    if batch is None:
+        raise RuntimeError("Smoke test could not find a non-empty batch after filtering")
 
     print(f"[smoke] overfitting 1 batch for {smoke_steps} steps")
     progress = tqdm(range(smoke_steps), desc="smoke", unit="step")
     for step in progress:
+        if batch is None:
+            continue
         loss, grad_norm = trainer.train_step(batch)
         progress.set_postfix(
             loss=f"{loss:.4f}",
@@ -271,6 +297,12 @@ def _run_training_loop(
         trainer.state.epoch = epoch
         running_loss = 0.0
         n_batches = 0
+        skipped_non_finite = 0
+        skipped_since_backoff = 0
+        max_skipped = int(cfg.training.max_skipped_steps_per_epoch)
+        backoff_trigger = int(cfg.training.skip_backoff_trigger)
+        backoff_factor = float(cfg.training.skip_backoff_factor)
+        min_lr = float(cfg.training.min_lr)
 
         train_progress = tqdm(
             train_loader,
@@ -279,13 +311,62 @@ def _run_training_loop(
             leave=False,
         )
         for batch in train_progress:
+            if batch is None:
+                continue
             loss, grad_norm = trainer.train_step(batch)
+
+            if not (math.isfinite(loss) and math.isfinite(grad_norm)):
+                skipped_non_finite += 1
+                skipped_since_backoff += 1
+                train_progress.set_postfix(
+                    skipped=skipped_non_finite,
+                    lr=f"{trainer._current_lr():.2e}",
+                )
+                if skipped_non_finite <= 5 or skipped_non_finite % 20 == 0:
+                    print(
+                        f"epoch={epoch + 1} step={trainer.state.global_step} "
+                        f"non-finite step skipped (loss={loss}, grad_norm={grad_norm})"
+                    )
+                if skipped_non_finite >= max_skipped:
+                    raise RuntimeError(
+                        f"Too many non-finite steps in epoch {epoch + 1}: "
+                        f"{skipped_non_finite} >= {max_skipped}."
+                    )
+
+                if skipped_since_backoff >= backoff_trigger:
+                    old_lr = trainer._current_lr()
+                    new_lr = max(min_lr, old_lr * backoff_factor)
+                    for group in trainer.optimizer.param_groups:
+                        group["lr"] = max(min_lr, float(group["lr"]) * backoff_factor)
+
+                    # Keep LambdaLR effective when its future values depend on base_lrs.
+                    if trainer.scheduler is not None and hasattr(trainer.scheduler, "base_lrs"):
+                        trainer.scheduler.base_lrs = [
+                            max(min_lr, float(base_lr) * backoff_factor)
+                            for base_lr in trainer.scheduler.base_lrs
+                        ]
+
+                    print(
+                        f"epoch={epoch + 1} step={trainer.state.global_step} "
+                        f"adaptive LR backoff: {old_lr:.2e} -> {new_lr:.2e} "
+                        f"after {skipped_since_backoff} skipped non-finite steps"
+                    )
+                    if trainer.use_mlflow:
+                        mlflow.log_metric(
+                            "train/adaptive_lr_backoff",
+                            new_lr,
+                            step=trainer.state.global_step,
+                        )
+                    skipped_since_backoff = 0
+                continue
+
             running_loss += loss
             n_batches += 1
             train_progress.set_postfix(
                 loss=f"{loss:.4f}",
                 grad_norm=f"{grad_norm:.3f}",
                 lr=f"{trainer._current_lr():.2e}",
+                skipped=skipped_non_finite,
             )
             if n_batches % log_every == 0:
                 print(
@@ -295,9 +376,17 @@ def _run_training_loop(
                 )
 
         avg_loss = running_loss / max(1, n_batches)
-        print(f"epoch={epoch + 1}  train_loss={avg_loss:.6f}")
+        print(
+            f"epoch={epoch + 1}  train_loss={avg_loss:.6f}  "
+            f"finite_steps={n_batches} skipped_steps={skipped_non_finite}"
+        )
         if trainer.use_mlflow:
             mlflow.log_metric("train/epoch_loss", avg_loss, step=trainer.state.global_step)
+            mlflow.log_metric(
+                "train/skipped_non_finite_steps",
+                skipped_non_finite,
+                step=trainer.state.global_step,
+            )
 
         if val_loader is not None and (epoch + 1) % validate_every == 0:
             val_loss = trainer.validate(val_loader)

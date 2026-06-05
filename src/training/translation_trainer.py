@@ -6,6 +6,7 @@ Extends the generic Trainer by handling:
 - Correct model.forward(**kwargs) dispatch
 """
 
+import math
 from typing import Any
 
 import torch
@@ -60,18 +61,45 @@ class TranslationTrainer(Trainer):
         self.optimizer.zero_grad(set_to_none=True)
 
         batch = self._move_to_device(batch)
-        logits, labels = self._seq2seq_step(batch)
+        with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+            logits, labels = self._seq2seq_step(batch)
+            loss = self.criterion(logits, labels)
 
-        loss = self.criterion(logits, labels)
-        loss.backward()
+        if not torch.isfinite(loss):
+            self.state.skipped_steps += 1
+            self.optimizer.zero_grad(set_to_none=True)
+            return float("nan"), float("nan")
+
+        self.scaler.scale(loss).backward()
+
+        if self.use_amp:
+            self.scaler.unscale_(self.optimizer)
 
         grad_norm = self._compute_grad_norm()
+        if not math.isfinite(grad_norm):
+            self.state.skipped_steps += 1
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.use_amp:
+                self.scaler.update()
+            return float(loss.item()), float("nan")
+
         if self.grad_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
-        self.optimizer.step()
-        if self.scheduler is not None:
+        optimizer_stepped = True
+        if self.use_amp:
+            prev_scale = self.scaler.get_scale()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            optimizer_stepped = self.scaler.get_scale() >= prev_scale
+        else:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+        if self.scheduler is not None and optimizer_stepped:
             self.scheduler.step()
+        if not optimizer_stepped:
+            self.state.skipped_steps += 1
 
         self.state.global_step += 1
         self._log_metrics(loss=float(loss.item()), grad_norm=grad_norm)
@@ -84,9 +112,14 @@ class TranslationTrainer(Trainer):
         n_batches = 0
 
         for batch in dataloader:
+            if batch is None:
+                continue
             batch = self._move_to_device(batch)
-            logits, labels = self._seq2seq_step(batch)
-            loss = self.criterion(logits, labels)
+            with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+                logits, labels = self._seq2seq_step(batch)
+                loss = self.criterion(logits, labels)
+            if not torch.isfinite(loss):
+                continue
             running_loss += float(loss.item())
             n_batches += 1
 

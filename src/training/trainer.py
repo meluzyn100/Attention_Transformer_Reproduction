@@ -1,4 +1,5 @@
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ except Exception:  # pragma: no cover
 class TrainerState:
     global_step: int = 0
     epoch: int = 0
+    skipped_steps: int = 0
 
 
 class Trainer:
@@ -27,6 +29,7 @@ class Trainer:
         scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
         device: str | torch.device = "cpu",
         grad_clip_norm: float | None = None,
+        use_amp: bool = False,
         use_mlflow: bool = True,
     ) -> None:
         self.model = model
@@ -35,6 +38,8 @@ class Trainer:
         self.scheduler = scheduler
         self.device = torch.device(device)
         self.grad_clip_norm = grad_clip_norm
+        self.use_amp = bool(use_amp and self.device.type == "cuda" and torch.cuda.is_available())
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
         self.use_mlflow = use_mlflow and (mlflow is not None)
         self.state = TrainerState()
 
@@ -122,18 +127,45 @@ class Trainer:
 
         batch = self._move_to_device(batch)
         model_inputs, targets = self._split_batch(batch)
-        logits = self._forward(model_inputs)
+        with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+            logits = self._forward(model_inputs)
+            loss = self.criterion(logits, targets)
 
-        loss = self.criterion(logits, targets)
-        loss.backward()
+        if not torch.isfinite(loss):
+            self.state.skipped_steps += 1
+            self.optimizer.zero_grad(set_to_none=True)
+            return float("nan"), float("nan")
+
+        self.scaler.scale(loss).backward()
+
+        if self.use_amp:
+            self.scaler.unscale_(self.optimizer)
 
         grad_norm = self._compute_grad_norm()
+        if not math.isfinite(grad_norm):
+            self.state.skipped_steps += 1
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.use_amp:
+                self.scaler.update()
+            return float(loss.item()), float("nan")
+
         if self.grad_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
-        self.optimizer.step()
-        if self.scheduler is not None:
+        optimizer_stepped = True
+        if self.use_amp:
+            prev_scale = self.scaler.get_scale()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            optimizer_stepped = self.scaler.get_scale() >= prev_scale
+        else:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+        if self.scheduler is not None and optimizer_stepped:
             self.scheduler.step()
+        if not optimizer_stepped:
+            self.state.skipped_steps += 1
 
         self.state.global_step += 1
         self._log_metrics(loss=float(loss.item()), grad_norm=grad_norm)
@@ -146,10 +178,13 @@ class Trainer:
         n_batches = 0
 
         for batch in dataloader:
+            if batch is None:
+                continue
             batch = self._move_to_device(batch)
             model_inputs, targets = self._split_batch(batch)
-            logits = self._forward(model_inputs)
-            loss = self.criterion(logits, targets)
+            with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+                logits = self._forward(model_inputs)
+                loss = self.criterion(logits, targets)
             running_loss += float(loss.item())
             n_batches += 1
 
