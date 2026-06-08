@@ -12,6 +12,7 @@ import random
 import gc
 import os
 import math
+import sys
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -170,6 +171,8 @@ def _build_trainer(
 
     device = cfg.training.device
     grad_clip = cfg.training.grad_clip_norm
+    accum_steps = int(cfg.training.get("accum_steps", 1))
+    amp_dtype = str(cfg.training.get("amp_dtype", "auto"))
 
     return TranslationTrainer(
         model=model,
@@ -178,7 +181,9 @@ def _build_trainer(
         scheduler=scheduler,
         device=device,
         grad_clip_norm=float(grad_clip) if grad_clip is not None else None,
+        accum_steps=accum_steps,
         use_amp=bool(cfg.training.use_amp),
+        amp_dtype=amp_dtype,
         use_mlflow=bool(cfg.mlflow.enabled),
     )
 
@@ -266,7 +271,7 @@ def _run_smoke_test(
     for step in progress:
         if batch is None:
             continue
-        loss, grad_norm = trainer.train_step(batch)
+        loss, grad_norm, _ = trainer.train_step(batch)
         progress.set_postfix(
             loss=f"{loss:.4f}",
             grad_norm=f"{grad_norm:.3f}",
@@ -290,10 +295,20 @@ def _run_training_loop(
     validate_every = int(cfg.training.validate_every)
     save_every = int(cfg.training.save_every)
     log_every = int(cfg.training.log_every)
+    checkpoint_every_steps = int(cfg.training.get("checkpoint_every_steps", 0))
+    max_steps = cfg.training.get("max_steps", None)
+    max_steps = int(max_steps) if max_steps is not None else None
     ckpt_dir = Path(cfg.training.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    reached_max_steps = False
+    last_saved_step = -1
+
     for epoch in range(trainer.state.epoch, epochs):
+        if max_steps is not None and trainer.state.global_step >= max_steps:
+            reached_max_steps = True
+            break
+
         trainer.state.epoch = epoch
         running_loss = 0.0
         n_batches = 0
@@ -313,7 +328,7 @@ def _run_training_loop(
         for batch in train_progress:
             if batch is None:
                 continue
-            loss, grad_norm = trainer.train_step(batch)
+            loss, grad_norm, optimizer_stepped = trainer.train_step(batch)
 
             if not (math.isfinite(loss) and math.isfinite(grad_norm)):
                 skipped_non_finite += 1
@@ -368,12 +383,25 @@ def _run_training_loop(
                 lr=f"{trainer._current_lr():.2e}",
                 skipped=skipped_non_finite,
             )
+
+            if optimizer_stepped and checkpoint_every_steps > 0:
+                if trainer.state.global_step % checkpoint_every_steps == 0:
+                    ckpt_path = ckpt_dir / f"step_{trainer.state.global_step:06d}.pt"
+                    trainer.save_checkpoint(ckpt_path)
+                    _log_checkpoint_artifact(cfg, ckpt_path)
+                    last_saved_step = trainer.state.global_step
+                    print(f"saved step checkpoint: {ckpt_path}")
+
             if n_batches % log_every == 0:
                 print(
                     f"epoch={epoch + 1}  step={trainer.state.global_step}  "
                     f"loss={loss:.6f}  grad_norm={grad_norm:.4f}  "
                     f"lr={trainer._current_lr():.2e}"
                 )
+
+            if max_steps is not None and trainer.state.global_step >= max_steps:
+                reached_max_steps = True
+                break
 
         avg_loss = running_loss / max(1, n_batches)
         print(
@@ -397,6 +425,15 @@ def _run_training_loop(
             trainer.save_checkpoint(ckpt_path)
             _log_checkpoint_artifact(cfg, ckpt_path)
             print(f"saved checkpoint: {ckpt_path}")
+
+        if reached_max_steps:
+            break
+
+    if reached_max_steps and trainer.state.global_step != last_saved_step:
+        ckpt_path = ckpt_dir / f"step_{trainer.state.global_step:06d}.pt"
+        trainer.save_checkpoint(ckpt_path)
+        _log_checkpoint_artifact(cfg, ckpt_path)
+        print(f"saved final max-steps checkpoint: {ckpt_path}")
 
 
 # ---------------------------------------------------------------------------

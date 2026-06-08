@@ -52,8 +52,9 @@ def collate_fn(
     source_max_len = max(len(sequence) for sequence in source_sequences)
     target_max_len = max(len(sequence) for sequence in target_sequences)
 
-    source_batch = torch.full((len(batch), source_max_len), pad_id, dtype=torch.long)
-    target_batch = torch.full((len(batch), target_max_len), pad_id, dtype=torch.long)
+    batch_size = len(filtered_batch)
+    source_batch = torch.full((batch_size, source_max_len), pad_id, dtype=torch.long)
+    target_batch = torch.full((batch_size, target_max_len), pad_id, dtype=torch.long)
 
     for row_index, sequence in enumerate(source_sequences):
         source_batch[row_index, : len(sequence)] = torch.tensor(

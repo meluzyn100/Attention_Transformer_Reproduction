@@ -37,7 +37,8 @@ class LabelSmoothingCrossEntropyLoss(nn.Module):
                 f"Expected logits last dim == {self.vocab_size}, got {logits.size(-1)}"
             )
 
-        logits = logits.reshape(-1, logits.size(-1))
+        # Compute the loss in float32 for numerical stability under AMP.
+        logits = logits.float().reshape(-1, logits.size(-1))
         target = target.reshape(-1)
 
         valid_mask = torch.ones_like(target, dtype=torch.bool)

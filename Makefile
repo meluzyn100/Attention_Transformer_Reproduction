@@ -1,4 +1,4 @@
-.PHONY: help install lint format test ci act clean download-data train-tokenizer train smoke train-mlflow mlflow-ui
+.PHONY: help install lint format test ci act clean download-data train-tokenizer train train-base average-base smoke train-mlflow mlflow-ui
 
 help:
 	@echo "Targets:"
@@ -6,8 +6,9 @@ help:
 	@echo "  download-data  Download raw WMT14 de-en data"
 	@echo "  train-tokenizer  Train the shared BPE tokenizer"
 	@echo "  train    Run the default training config"
+	@echo "  train-base  Run Base EN-DE training config (Phase 4)"
+	@echo "  average-base  Average last N base checkpoints into averaged.pt"
 	@echo "  smoke    Run the smoke-test config"
-	@echo "  train-mlflow  Run training with MLflow enabled"
 	@echo "  mlflow-ui  Start the local MLflow UI on port 5000"
 	@echo "  lint     Run ruff"
 	@echo "  format   Run black"
@@ -30,6 +31,14 @@ install:
 
 train:
 	python train.py
+
+train-base:
+	python train.py --config-name=base_en_de
+
+average-base:
+# 	make average-base CHECKPOINT_DIR=checkpoints/check0dir
+# 	python scripts/average_checkpoints.py --checkpoint-dir checkpoints/base_en_de --n-last 5 --output checkpoints/base_en_de/averaged.pt
+	python scripts/average_checkpoints.py --checkpoint-dir $(CHECKPOINT_DIR) --n-last 5 --output checkpoints/base_en_de/averaged.pt
 
 smoke:
 	python train.py --config-name smoke

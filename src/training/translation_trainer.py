@@ -56,54 +56,69 @@ class TranslationTrainer(Trainer):
         # logits: (B, T-1, vocab_size) — reshape for loss
         return logits, labels
 
-    def train_step(self, batch: Any) -> tuple[float, float]:
+    def train_step(self, batch: Any) -> tuple[float, float, bool]:
         self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
+        if self._accum_counter == 0:
+            self.optimizer.zero_grad(set_to_none=True)
 
         batch = self._move_to_device(batch)
-        with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+        with self._amp_context():
             logits, labels = self._seq2seq_step(batch)
             loss = self.criterion(logits, labels)
 
         if not torch.isfinite(loss):
             self.state.skipped_steps += 1
+            self._accum_counter = 0
             self.optimizer.zero_grad(set_to_none=True)
-            return float("nan"), float("nan")
+            return float("nan"), float("nan"), False
 
-        self.scaler.scale(loss).backward()
+        raw_loss_value = float(loss.item())
+        loss = loss / self.accum_steps
+        if self.use_grad_scaler:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        if self.use_amp:
+        self._accum_counter += 1
+        should_step = self._accum_counter >= self.accum_steps
+        if not should_step:
+            return raw_loss_value, 0.0, False
+
+        if self.use_grad_scaler:
             self.scaler.unscale_(self.optimizer)
 
         grad_norm = self._compute_grad_norm()
         if not math.isfinite(grad_norm):
             self.state.skipped_steps += 1
+            self._accum_counter = 0
             self.optimizer.zero_grad(set_to_none=True)
-            if self.use_amp:
+            if self.use_grad_scaler:
                 self.scaler.update()
-            return float(loss.item()), float("nan")
+            return raw_loss_value, float("nan"), False
 
         if self.grad_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
         optimizer_stepped = True
-        if self.use_amp:
+        if self.use_grad_scaler:
             prev_scale = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
             optimizer_stepped = self.scaler.get_scale() >= prev_scale
         else:
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            self.optimizer.step()
+
+        self._accum_counter = 0
 
         if self.scheduler is not None and optimizer_stepped:
             self.scheduler.step()
         if not optimizer_stepped:
             self.state.skipped_steps += 1
 
-        self.state.global_step += 1
-        self._log_metrics(loss=float(loss.item()), grad_norm=grad_norm)
-        return float(loss.item()), float(grad_norm)
+        if optimizer_stepped:
+            self.state.global_step += 1
+            self._log_metrics(loss=raw_loss_value, grad_norm=grad_norm)
+        return raw_loss_value, float(grad_norm), optimizer_stepped
 
     @torch.no_grad()
     def validate(self, dataloader: torch.utils.data.DataLoader) -> float:
@@ -115,7 +130,7 @@ class TranslationTrainer(Trainer):
             if batch is None:
                 continue
             batch = self._move_to_device(batch)
-            with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+            with self._amp_context():
                 logits, labels = self._seq2seq_step(batch)
                 loss = self.criterion(logits, labels)
             if not torch.isfinite(loss):

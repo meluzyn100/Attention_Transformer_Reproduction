@@ -52,10 +52,11 @@ training:
   ignore_index: 0              # PAD_ID
   device: cuda                 # or "cpu"
   use_amp: true
+  amp_dtype: auto              # auto|bf16|fp16
   grad_clip_norm: 0.5
-  max_skipped_steps_per_epoch: 500
+  max_skipped_steps_per_epoch: 1000
   # skip_backoff_trigger: 20
-  skip_backoff_trigger: 500
+  skip_backoff_trigger: 1000
   skip_backoff_factor: 0.5
   min_lr: 1.0e-6
   checkpoint_dir: checkpoints
@@ -71,7 +72,7 @@ mlflow:
   tracking_uri: null          # defaults to local sqlite in ${mlflow.base_dir}
   experiment_name: attention_transformer
   run_name: null
-  log_checkpoints: true
+  log_checkpoints: false      # avoid duplicate checkpoint files in both checkpoints/ and runs/mlflow/artifacts/
   tags: {}
 
 # ---- Smoke test -------------------------------------------

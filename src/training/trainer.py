@@ -1,5 +1,6 @@
 
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,9 @@ class Trainer:
         scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
         device: str | torch.device = "cpu",
         grad_clip_norm: float | None = None,
+        accum_steps: int = 1,
         use_amp: bool = False,
+        amp_dtype: str = "auto",
         use_mlflow: bool = True,
     ) -> None:
         self.model = model
@@ -38,12 +41,46 @@ class Trainer:
         self.scheduler = scheduler
         self.device = torch.device(device)
         self.grad_clip_norm = grad_clip_norm
+        self.accum_steps = max(1, int(accum_steps))
+        self._accum_counter = 0
         self.use_amp = bool(use_amp and self.device.type == "cuda" and torch.cuda.is_available())
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.amp_dtype = self._resolve_amp_dtype(amp_dtype)
+        self.use_grad_scaler = self.use_amp and self.amp_dtype == torch.float16
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
         self.use_mlflow = use_mlflow and (mlflow is not None)
         self.state = TrainerState()
 
         self.model.to(self.device)
+
+    def _resolve_amp_dtype(self, amp_dtype: str) -> torch.dtype | None:
+        if not self.use_amp:
+            return None
+
+        value = str(amp_dtype).lower().strip()
+        bf16_supported = torch.cuda.is_bf16_supported()
+
+        if value == "auto":
+            return torch.bfloat16 if bf16_supported else torch.float16
+        if value in {"bf16", "bfloat16"}:
+            if not bf16_supported:
+                warnings.warn(
+                    "Requested AMP bf16, but this CUDA device does not support bf16. "
+                    "Falling back to fp16.",
+                    RuntimeWarning,
+                )
+                return torch.float16
+            return torch.bfloat16
+        if value in {"fp16", "float16", "half"}:
+            return torch.float16
+
+        raise ValueError("amp_dtype must be one of: auto, bf16, fp16")
+
+    def _amp_context(self) -> torch.amp.autocast_mode.autocast:
+        return torch.autocast(
+            device_type=self.device.type,
+            enabled=self.use_amp,
+            dtype=self.amp_dtype if self.use_amp else None,
+        )
 
     def _move_to_device(self, value: Any) -> Any:
         if isinstance(value, torch.Tensor):
@@ -121,55 +158,70 @@ class Trainer:
             metrics["train/grad_norm"] = float(grad_norm)
         mlflow.log_metrics(metrics, step=self.state.global_step)
 
-    def train_step(self, batch: Any) -> tuple[float, float]:
+    def train_step(self, batch: Any) -> tuple[float, float, bool]:
         self.model.train()
-        self.optimizer.zero_grad(set_to_none=True)
+        if self._accum_counter == 0:
+            self.optimizer.zero_grad(set_to_none=True)
 
         batch = self._move_to_device(batch)
         model_inputs, targets = self._split_batch(batch)
-        with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+        with self._amp_context():
             logits = self._forward(model_inputs)
             loss = self.criterion(logits, targets)
 
         if not torch.isfinite(loss):
             self.state.skipped_steps += 1
+            self._accum_counter = 0
             self.optimizer.zero_grad(set_to_none=True)
-            return float("nan"), float("nan")
+            return float("nan"), float("nan"), False
 
-        self.scaler.scale(loss).backward()
+        raw_loss_value = float(loss.item())
+        loss = loss / self.accum_steps
+        if self.use_grad_scaler:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        if self.use_amp:
+        self._accum_counter += 1
+        should_step = self._accum_counter >= self.accum_steps
+        if not should_step:
+            return raw_loss_value, 0.0, False
+
+        if self.use_grad_scaler:
             self.scaler.unscale_(self.optimizer)
 
         grad_norm = self._compute_grad_norm()
         if not math.isfinite(grad_norm):
             self.state.skipped_steps += 1
+            self._accum_counter = 0
             self.optimizer.zero_grad(set_to_none=True)
-            if self.use_amp:
+            if self.use_grad_scaler:
                 self.scaler.update()
-            return float(loss.item()), float("nan")
+            return raw_loss_value, float("nan"), False
 
         if self.grad_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
         optimizer_stepped = True
-        if self.use_amp:
+        if self.use_grad_scaler:
             prev_scale = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
             optimizer_stepped = self.scaler.get_scale() >= prev_scale
         else:
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            self.optimizer.step()
+
+        self._accum_counter = 0
 
         if self.scheduler is not None and optimizer_stepped:
             self.scheduler.step()
         if not optimizer_stepped:
             self.state.skipped_steps += 1
 
-        self.state.global_step += 1
-        self._log_metrics(loss=float(loss.item()), grad_norm=grad_norm)
-        return float(loss.item()), float(grad_norm)
+        if optimizer_stepped:
+            self.state.global_step += 1
+            self._log_metrics(loss=raw_loss_value, grad_norm=grad_norm)
+        return raw_loss_value, float(grad_norm), optimizer_stepped
 
     @torch.no_grad()
     def validate(self, dataloader: torch.utils.data.DataLoader) -> float:
@@ -182,7 +234,7 @@ class Trainer:
                 continue
             batch = self._move_to_device(batch)
             model_inputs, targets = self._split_batch(batch)
-            with torch.autocast(device_type=self.device.type, enabled=self.use_amp):
+            with self._amp_context():
                 logits = self._forward(model_inputs)
                 loss = self.criterion(logits, targets)
             running_loss += float(loss.item())
