@@ -11,12 +11,15 @@ import json
 import math
 import os
 import random
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DistributedSampler
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -27,6 +30,17 @@ import mlflow
 from mlflow.tracking import MlflowClient
 
 from src.data import SharedBPETokenizer, TranslationDataset, collate_fn
+from src.distributed import (
+    all_reduce_mean,
+    barrier,
+    cleanup_distributed,
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    init_distributed,
+    is_distributed,
+    is_rank0,
+)
 from src.training import (
     LabelSmoothingCrossEntropyLoss,
     TranslationTrainer,
@@ -36,12 +50,32 @@ from src.training import (
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, rank: int = 0) -> None:
+    seed = int(seed) + int(rank)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def resolve_device(cfg: DictConfig) -> str:
+    requested = str(cfg.training.device)
+    if not is_distributed() or requested == "cpu":
+        return requested
+    local_rank = get_local_rank()
+    if requested.startswith("cuda"):
+        torch.cuda.set_device(local_rank)
+        return f"cuda:{local_rank}"
+    return requested
+
+
+def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
+    path = Path(checkpoint_dir)
+    if not path.exists():
+        return None
+    checkpoints = sorted(path.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+    return checkpoints[-1] if checkpoints else None
 
 
 def flatten_config(cfg: dict[str, Any], prefix: str = "") -> dict[str, str]:
@@ -79,7 +113,7 @@ def load_jsonl(
 
 def build_dataloaders(
     cfg: DictConfig, tokenizer: SharedBPETokenizer
-) -> tuple[DataLoader, DataLoader | None]:
+) -> tuple[DataLoader, DataLoader | None, DistributedSampler | None]:
     """Build train and optional validation dataloaders."""
     batch_size = int(cfg.data.batch_size)
     num_workers = int(cfg.data.num_workers)
@@ -92,6 +126,15 @@ def build_dataloaders(
     max_train_samples = cfg.data.max_train_samples and int(cfg.data.max_train_samples)
     train_src, train_tgt = load_jsonl(cfg.data.train_jsonl, max_train_samples)
     train_ds = TranslationDataset(train_src, train_tgt, tokenizer)
+    train_sampler = None
+    if is_distributed():
+        train_sampler = DistributedSampler(
+            train_ds,
+            num_replicas=get_world_size(),
+            rank=get_rank(),
+            shuffle=True,
+            drop_last=False,
+        )
     collate_batch = partial(
         collate_fn, pad_id=tokenizer.pad_id, max_length=cfg.model.max_len
     )
@@ -99,7 +142,8 @@ def build_dataloaders(
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=num_workers,
         collate_fn=collate_batch,
         pin_memory=pin_memory,
@@ -123,12 +167,22 @@ def build_dataloaders(
             multiprocessing_context=multiprocessing_context,
             prefetch_factor=prefetch_factor,
         )
-    return train_loader, val_loader
+    return train_loader, val_loader, train_sampler
 
 
 def build_trainer(cfg: DictConfig) -> TranslationTrainer:
     """Build trainer with model, optimizer, and loss."""
     model = instantiate(cfg.model)
+    if is_distributed() and get_world_size() > 1:
+        if str(cfg.training.device).startswith("cuda"):
+            model = DDP(
+                model,
+                device_ids=[get_local_rank()],
+                output_device=get_local_rank(),
+                find_unused_parameters=False,
+            )
+        else:
+            model = DDP(model, find_unused_parameters=False)
     optimizer = instantiate(cfg.optimizer, params=model.parameters())
     criterion = LabelSmoothingCrossEntropyLoss(
         vocab_size=int(cfg.model.vocab_size),
@@ -157,13 +211,16 @@ def build_trainer(cfg: DictConfig) -> TranslationTrainer:
         accum_steps=int(cfg.training.get("accum_steps", 1)),
         use_amp=cfg.training.use_amp,
         amp_dtype=str(cfg.training.get("amp_dtype", "auto")),
-        use_mlflow=cfg.mlflow.enabled,
+        use_mlflow=cfg.mlflow.enabled and is_rank0(),
+        rank=get_rank(),
+        world_size=get_world_size(),
+        gpu_monitoring=bool(cfg.training.get("gpu_monitoring", True)),
     )
 
 
 def init_mlflow(cfg: DictConfig) -> bool:
     """Initialize MLflow tracking."""
-    if not cfg.mlflow.enabled:
+    if not cfg.mlflow.enabled or not is_rank0():
         return False
 
     base_dir = Path(get_original_cwd()) / cfg.mlflow.base_dir
@@ -199,7 +256,12 @@ def close_mlflow(active: bool) -> None:
 
 
 def log_checkpoint(cfg: DictConfig, path: Path) -> None:
-    if cfg.mlflow.enabled and cfg.mlflow.log_checkpoints and path.exists():
+    if (
+        is_rank0()
+        and cfg.mlflow.enabled
+        and cfg.mlflow.log_checkpoints
+        and path.exists()
+    ):
         mlflow.log_artifact(str(path), artifact_path="checkpoints")
 
 
@@ -221,16 +283,19 @@ def run_smoke(
     if not batch:
         raise RuntimeError("no batches found")
 
-    print(f"[smoke] overfitting 1 batch for {steps} steps")
-    pbar = tqdm(range(steps), desc="smoke", unit="step")
+    rank0 = is_rank0()
+    if rank0:
+        print(f"[smoke] overfitting 1 batch for {steps} steps")
+    pbar = tqdm(range(steps), desc="smoke", unit="step", disable=not rank0)
     for step in pbar:
         loss, grad_norm, _ = trainer.train_step(batch)
-        pbar.set_postfix(
-            loss=f"{loss:.4f}",
-            grad_norm=f"{grad_norm:.3f}",
-            lr=f"{trainer._current_lr():.2e}",
-        )
-        if step == 0 or (step + 1) % 10 == 0:
+        if rank0:
+            pbar.set_postfix(
+                loss=f"{loss:.4f}",
+                grad_norm=f"{grad_norm:.3f}",
+                lr=f"{trainer._current_lr():.2e}",
+            )
+        if rank0 and (step == 0 or (step + 1) % 10 == 0):
             print(
                 f"[smoke] step={step+1:>3}/{steps}  loss={loss:.6f}  grad_norm={grad_norm:.4f}  lr={trainer._current_lr():.2e}"
             )
@@ -241,6 +306,7 @@ def run_training(
     train_loader: DataLoader,
     val_loader: DataLoader | None,
     cfg: DictConfig,
+    train_sampler: DistributedSampler | None = None,
 ) -> None:
     """Main training loop."""
     epochs = int(cfg.training.epochs)
@@ -251,6 +317,7 @@ def run_training(
     max_steps = cfg.training.get("max_steps") and int(cfg.training.max_steps)
     checkpoint_dir = Path(cfg.training.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    rank0 = is_rank0()
 
     last_saved_step = -1
     for epoch in range(trainer.state.epoch, epochs):
@@ -258,6 +325,8 @@ def run_training(
             break
 
         trainer.state.epoch = epoch
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         running_loss = 0.0
         num_batches = 0
         skipped_non_finite = 0
@@ -268,12 +337,21 @@ def run_training(
         min_lr = float(cfg.training.min_lr)
 
         pbar = tqdm(
-            train_loader, desc=f"epoch {epoch+1}/{epochs}", unit="batch", leave=False
+            train_loader,
+            desc=f"epoch {epoch+1}/{epochs}",
+            unit="batch",
+            leave=False,
+            disable=not rank0,
         )
+        batch_fetch_started = time.perf_counter()
         for batch in pbar:
+            data_time_s = time.perf_counter() - batch_fetch_started
             if not batch:
+                batch_fetch_started = time.perf_counter()
                 continue
+            step_started = time.perf_counter()
             loss, grad_norm, stepped = trainer.train_step(batch)
+            step_time_s = time.perf_counter() - step_started
 
             if not (math.isfinite(loss) and math.isfinite(grad_norm)):
                 skipped_non_finite += 1
@@ -281,7 +359,7 @@ def run_training(
                 pbar.set_postfix(
                     skipped=skipped_non_finite, lr=f"{trainer._current_lr():.2e}"
                 )
-                if skipped_non_finite <= 5 or skipped_non_finite % 20 == 0:
+                if rank0 and (skipped_non_finite <= 5 or skipped_non_finite % 20 == 0):
                     print(
                         f"epoch={epoch+1} step={trainer.state.global_step} skipped (loss={loss}, grad_norm={grad_norm})"
                     )
@@ -302,9 +380,10 @@ def run_training(
                             max(min_lr, base * backoff_factor)
                             for base in trainer.scheduler.base_lrs
                         ]
-                    print(
+                    if rank0:
+                        print(
                         f"epoch={epoch+1} step={trainer.state.global_step} LR backoff: {old_lr:.2e} -> {new_lr:.2e}"
-                    )
+                        )
                     if trainer.use_mlflow:
                         mlflow.log_metric(
                             "train/adaptive_lr_backoff",
@@ -312,16 +391,35 @@ def run_training(
                             step=trainer.state.global_step,
                         )
                     skipped_since_backoff = 0
+                batch_fetch_started = time.perf_counter()
                 continue
 
             running_loss += loss
             num_batches += 1
-            pbar.set_postfix(
-                loss=f"{loss:.4f}",
-                grad_norm=f"{grad_norm:.3f}",
-                lr=f"{trainer._current_lr():.2e}",
-                skipped=skipped_non_finite,
+            samples = int(batch[0].shape[0]) if isinstance(batch, (tuple, list)) else 0
+            tokens = (
+                int(batch[0].numel() + batch[1].numel())
+                if isinstance(batch, (tuple, list))
+                else 0
             )
+            perf_metrics = trainer.get_performance_metrics(
+                samples=samples,
+                tokens=tokens,
+                step_time_s=step_time_s,
+                data_time_s=data_time_s,
+            )
+
+            if rank0:
+                pbar.set_postfix(
+                    loss=f"{loss:.4f}",
+                    grad_norm=f"{grad_norm:.3f}",
+                    lr=f"{trainer._current_lr():.2e}",
+                    tok_s=f"{perf_metrics['perf/tokens_per_s']:.0f}",
+                    skipped=skipped_non_finite,
+                )
+
+            if stepped and trainer.use_mlflow and rank0:
+                mlflow.log_metrics(perf_metrics, step=trainer.state.global_step)
 
             if (
                 stepped
@@ -332,22 +430,27 @@ def run_training(
                     checkpoint_dir / f"step_{trainer.state.global_step:06d}.pt"
                 )
                 trainer.save_checkpoint(checkpoint_path)
+                barrier()
                 log_checkpoint(cfg, checkpoint_path)
                 last_saved_step = trainer.state.global_step
-                print(f"saved checkpoint: {checkpoint_path}")
+                if rank0:
+                    print(f"saved checkpoint: {checkpoint_path}")
 
-            if num_batches % log_every == 0:
+            if rank0 and num_batches % log_every == 0:
                 print(
                     f"epoch={epoch+1} step={trainer.state.global_step} loss={loss:.6f} grad_norm={grad_norm:.4f} lr={trainer._current_lr():.2e}"
                 )
 
             if max_steps and trainer.state.global_step >= max_steps:
                 break
+            batch_fetch_started = time.perf_counter()
 
         avg_loss = running_loss / max(1, num_batches)
-        print(
-            f"epoch={epoch+1} train_loss={avg_loss:.6f} finite={num_batches} skipped={skipped_non_finite}"
-        )
+        avg_loss = all_reduce_mean(avg_loss, trainer.device)
+        if rank0:
+            print(
+                f"epoch={epoch+1} train_loss={avg_loss:.6f} finite={num_batches} skipped={skipped_non_finite}"
+            )
         if trainer.use_mlflow:
             mlflow.log_metric(
                 "train/epoch_loss", avg_loss, step=trainer.state.global_step
@@ -360,13 +463,19 @@ def run_training(
 
         if val_loader and (epoch + 1) % validate_every == 0:
             val_loss = trainer.validate(val_loader)
-            print(f"epoch={epoch+1} val_loss={val_loss:.6f}")
+            val_loss = all_reduce_mean(val_loss, trainer.device)
+            if rank0:
+                print(f"epoch={epoch+1} val_loss={val_loss:.6f}")
+            if trainer.use_mlflow:
+                mlflow.log_metric("val/loss_reduced", val_loss, step=trainer.state.global_step)
 
         if (epoch + 1) % save_every == 0:
             checkpoint_path = checkpoint_dir / f"epoch_{epoch+1:03d}.pt"
             trainer.save_checkpoint(checkpoint_path)
+            barrier()
             log_checkpoint(cfg, checkpoint_path)
-            print(f"saved checkpoint: {checkpoint_path}")
+            if rank0:
+                print(f"saved checkpoint: {checkpoint_path}")
 
         if max_steps and trainer.state.global_step >= max_steps:
             break
@@ -374,40 +483,69 @@ def run_training(
     if max_steps and trainer.state.global_step != last_saved_step:
         checkpoint_path = checkpoint_dir / f"step_{trainer.state.global_step:06d}.pt"
         trainer.save_checkpoint(checkpoint_path)
+        barrier()
         log_checkpoint(cfg, checkpoint_path)
-        print(f"saved final checkpoint: {checkpoint_path}")
+        if rank0:
+            print(f"saved final checkpoint: {checkpoint_path}")
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-    set_seed(int(cfg.training.seed))
-    tokenizer = train_loader = val_loader = trainer = None
+    ddp_active = False
+    tokenizer = train_loader = val_loader = train_sampler = trainer = None
     mlflow_ok = False
     try:
+        ddp_active = bool(cfg.distributed.enabled) and init_distributed(
+            backend=str(cfg.distributed.backend),
+            timeout_minutes=int(cfg.distributed.timeout_minutes),
+        )
+        if bool(cfg.distributed.enabled) and not ddp_active and is_rank0():
+            print("distributed.enabled=true but no distributed process group found; running single-process")
+        cfg.training.device = resolve_device(cfg)
+        rank = get_rank()
+        set_seed(int(cfg.training.seed), rank=rank)
+
         tokenizer = SharedBPETokenizer.load(
             cfg.data.tokenizer_vocab, cfg.data.tokenizer_merges
         )
-        train_loader, val_loader = build_dataloaders(cfg, tokenizer)
+        train_loader, val_loader, train_sampler = build_dataloaders(cfg, tokenizer)
         trainer = build_trainer(cfg)
-        print(
-            f"Model: {sum(p.numel() for p in trainer.model.parameters()):,} params  device={trainer.device}  smoke={cfg.smoke.enabled}"
-        )
+        if is_rank0():
+            print(
+                f"Model: {sum(p.numel() for p in trainer.model.parameters()):,} params  device={trainer.device}  smoke={cfg.smoke.enabled}  world_size={get_world_size()}"
+            )
+
+        resume_path = cfg.training.get("resume_from")
+        should_auto_resume = bool(cfg.training.get("auto_resume_latest", True)) and not bool(cfg.smoke.enabled)
+        if should_auto_resume and not resume_path:
+            latest = find_latest_checkpoint(cfg.training.checkpoint_dir)
+            resume_path = str(latest) if latest else None
+        if resume_path:
+            trainer.load_checkpoint(resume_path)
+            if is_rank0():
+                print(f"resumed from checkpoint: {resume_path}")
+            barrier()
 
         mlflow_ok = init_mlflow(cfg)
         if cfg.smoke.enabled:
             run_smoke(trainer, train_loader, cfg)
             path = Path(cfg.smoke.checkpoint_path)
             trainer.save_checkpoint(path)
+            barrier()
             log_checkpoint(cfg, path)
-            print(f"saved smoke checkpoint: {path}")
+            if is_rank0():
+                print(f"saved smoke checkpoint: {path}")
         else:
-            run_training(trainer, train_loader, val_loader, cfg)
+            run_training(trainer, train_loader, val_loader, cfg, train_sampler=train_sampler)
     except KeyboardInterrupt:
-        print("Training interrupted (Ctrl+C).")
+        if is_rank0():
+            print("Training interrupted (Ctrl+C).")
         raise SystemExit(130)
     finally:
         close_mlflow(mlflow_ok)
         cleanup_memory(trainer, train_loader, val_loader, tokenizer)
+        if ddp_active:
+            cleanup_distributed()
 
 
 if __name__ == "__main__":

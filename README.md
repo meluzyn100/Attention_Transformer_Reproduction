@@ -2,21 +2,20 @@
 
 This repository contains a from-scratch PyTorch implementation of the original Transformer (Vaswani et al., 2017), focused on rigorous reproduction of the paper's results on WMT 2014.
 
+## Training Modes
 
+- Single process (existing path): `python train.py`
+- Single-node multi-GPU DDP: `torchrun --standalone --nproc_per_node=4 train.py distributed.enabled=true training.device=cuda`
+- Base EN-DE profile with DDP: `torchrun --standalone --nproc_per_node=4 train.py --config-name base_en_de distributed.enabled=true training.device=cuda`
 
-#ideas to add in future:
-- add mlflow logging to the trainer and make it possible to run mlflow ui from the Makefile
-- add smoke test config and Makefile target to run it
-- add bucketed sampling to the dataloader to speed up training and make it more stable
-- add gradient clipping to the trainer
-- add learning rate scheduler with warmup to the trainer
-- add support for mixed precision training to the trainer
-- add support for resuming training from checkpoints to the trainer
-- add support for logging training and validation metrics to mlflow in the trainer
-- add support for saving model checkpoints to mlflow in the trainer
-- add support for early stopping based on validation loss to the trainer
-- add support for training on multiple GPUs to the trainer
-- add support for training on TPUs to the trainer
-- add support for distributed training to the trainer
-- add support for training on multiple nodes to the trainer
-- add support for training on multiple nodes with multiple GPUs to the trainer
+## Resume From Checkpoints
+
+- Auto-resume latest checkpoint is enabled by default: `training.auto_resume_latest=true`
+- Explicit resume path: `training.resume_from=checkpoints/base_en_de_v1/step_050000.pt`
+
+## DDP Preflight On Single GPU / Local Machine
+
+- DDP path with one process (useful before running on 2-8 GPUs):
+	- `torchrun --standalone --nproc_per_node=1 train.py --config-name smoke distributed.enabled=true training.device=cuda`
+- Multi-process logic check without multi-GPU (CPU + Gloo):
+	- `torchrun --standalone --nproc_per_node=2 train.py --config-name smoke distributed.enabled=true distributed.backend=gloo training.device=cpu`

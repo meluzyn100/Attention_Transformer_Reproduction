@@ -15,6 +15,8 @@ model:
   d_ff: 1024
   dropout: 0.1
   max_len: 1024
+  activation_checkpointing: false
+  activation_checkpointing_reentrant: false
 
 # ---- Data -------------------------------------------------
 data:
@@ -60,10 +62,19 @@ training:
   skip_backoff_factor: 0.5
   min_lr: 1.0e-6
   checkpoint_dir: checkpoints
+  resume_from: null            # explicit checkpoint path; if null and auto_resume_latest=true, latest *.pt is used
+  auto_resume_latest: true
   log_every: 500                # print every N optimizer steps
   validate_every: 1            # validate every N epochs
   save_every: 1                # save checkpoint every N epochs
+  gpu_monitoring: true
   seed: 42
+
+# ---- Distributed ------------------------------------------
+distributed:
+  enabled: false
+  backend: nccl
+  timeout_minutes: 30
 
 # ---- MLflow -----------------------------------------------
 mlflow:

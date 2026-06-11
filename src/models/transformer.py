@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from .embeddings import TokenEmbedding
 from .layers import DecoderLayer, EncoderLayer
@@ -39,6 +40,8 @@ class Encoder(nn.Module):
         dropout: float = 0.1,
         max_len: int = 5000,
         positional_encoding: str = "sinusoidal",
+        activation_checkpointing: bool = False,
+        activation_checkpointing_reentrant: bool = False,
     ) -> None:
         super().__init__()
         self.embedding = TokenEmbedding(vocab_size, d_model)
@@ -50,6 +53,8 @@ class Encoder(nn.Module):
                 for _ in range(num_layers)
             ]
         )
+        self.activation_checkpointing = activation_checkpointing
+        self.activation_checkpointing_reentrant = activation_checkpointing_reentrant
 
     def forward(
         self, src: torch.Tensor, src_mask: torch.Tensor | None = None
@@ -58,7 +63,15 @@ class Encoder(nn.Module):
         x = self.positional_encoding(x)
 
         for layer in self.layers:
-            x = layer(x, src_mask=src_mask)
+            if self.activation_checkpointing and self.training:
+                x = checkpoint(
+                    lambda h, m, layer=layer: layer(h, src_mask=m),
+                    x,
+                    src_mask,
+                    use_reentrant=self.activation_checkpointing_reentrant,
+                )
+            else:
+                x = layer(x, src_mask=src_mask)
 
         return x
 
@@ -74,6 +87,8 @@ class Decoder(nn.Module):
         dropout: float = 0.1,
         max_len: int = 5000,
         positional_encoding: str = "sinusoidal",
+        activation_checkpointing: bool = False,
+        activation_checkpointing_reentrant: bool = False,
     ) -> None:
         super().__init__()
         self.embedding = TokenEmbedding(vocab_size, d_model)
@@ -84,6 +99,8 @@ class Decoder(nn.Module):
                 for _ in range(num_layers)
             ]
         )
+        self.activation_checkpointing = activation_checkpointing
+        self.activation_checkpointing_reentrant = activation_checkpointing_reentrant
 
     def forward(
         self,
@@ -96,7 +113,22 @@ class Decoder(nn.Module):
         x = self.positional_encoding(x)
 
         for layer in self.layers:
-            x = layer(x, enc_output=enc_output, src_mask=src_mask, tgt_mask=tgt_mask)
+            if self.activation_checkpointing and self.training:
+                x = checkpoint(
+                    lambda h, enc, src_m, tgt_m, layer=layer: layer(
+                        h,
+                        enc_output=enc,
+                        src_mask=src_m,
+                        tgt_mask=tgt_m,
+                    ),
+                    x,
+                    enc_output,
+                    src_mask,
+                    tgt_mask,
+                    use_reentrant=self.activation_checkpointing_reentrant,
+                )
+            else:
+                x = layer(x, enc_output=enc_output, src_mask=src_mask, tgt_mask=tgt_mask)
 
         return x
 
@@ -112,6 +144,8 @@ class Transformer(nn.Module):
         dropout: float = 0.1,
         max_len: int = 5000,
         positional_encoding: str = "sinusoidal",
+        activation_checkpointing: bool = False,
+        activation_checkpointing_reentrant: bool = False,
     ) -> None:
         super().__init__()
         self.encoder = Encoder(
@@ -123,6 +157,8 @@ class Transformer(nn.Module):
             dropout=dropout,
             max_len=max_len,
             positional_encoding=positional_encoding,
+            activation_checkpointing=activation_checkpointing,
+            activation_checkpointing_reentrant=activation_checkpointing_reentrant,
         )
         self.decoder = Decoder(
             vocab_size=vocab_size,
@@ -133,6 +169,8 @@ class Transformer(nn.Module):
             dropout=dropout,
             max_len=max_len,
             positional_encoding=positional_encoding,
+            activation_checkpointing=activation_checkpointing,
+            activation_checkpointing_reentrant=activation_checkpointing_reentrant,
         )
         self.generator = nn.Linear(d_model, vocab_size)
 

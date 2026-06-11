@@ -30,6 +30,8 @@ model:
   h: ${heads}
   d_ff: ${d_ff}
   dropout: ${dropout}
+  activation_checkpointing: true
+  activation_checkpointing_reentrant: false
 
 optimizer:
   betas:
@@ -52,6 +54,9 @@ training:
   skip_backoff_factor: 0.5
   max_skipped_steps_per_epoch: 500
   min_lr: 1.0e-6
+
+distributed:
+  enabled: false
 data:
   # The current dataloader batches by examples; keep token counts for experiment tracking.
   batch_size_tokens: ${batch_size_tokens}
