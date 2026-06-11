@@ -74,6 +74,13 @@ def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
     path = Path(checkpoint_dir)
     if not path.exists():
         return None
+    preferred = []
+    for pattern in ("step_*.pt", "epoch_*.pt"):
+        preferred.extend(path.glob(pattern))
+    if preferred:
+        preferred = sorted(preferred, key=lambda p: p.stat().st_mtime)
+        return preferred[-1]
+
     checkpoints = sorted(path.glob("*.pt"), key=lambda p: p.stat().st_mtime)
     return checkpoints[-1] if checkpoints else None
 
@@ -517,14 +524,25 @@ def main(cfg: DictConfig) -> None:
 
         resume_path = cfg.training.get("resume_from")
         should_auto_resume = bool(cfg.training.get("auto_resume_latest", True)) and not bool(cfg.smoke.enabled)
+        resume_strict = bool(cfg.training.get("resume_strict", False))
         if should_auto_resume and not resume_path:
             latest = find_latest_checkpoint(cfg.training.checkpoint_dir)
             resume_path = str(latest) if latest else None
         if resume_path:
-            trainer.load_checkpoint(resume_path)
-            if is_rank0():
-                print(f"resumed from checkpoint: {resume_path}")
-            barrier()
+            try:
+                trainer.load_checkpoint(resume_path)
+                if is_rank0():
+                    print(f"resumed from checkpoint: {resume_path}")
+                barrier()
+            except RuntimeError as exc:
+                if resume_strict:
+                    raise
+                if is_rank0():
+                    short_error = str(exc).splitlines()[0]
+                    print(
+                        "resume checkpoint incompatible with current model/config; "
+                        f"starting from scratch (path={resume_path}, reason={short_error})"
+                    )
 
         mlflow_ok = init_mlflow(cfg)
         if cfg.smoke.enabled:

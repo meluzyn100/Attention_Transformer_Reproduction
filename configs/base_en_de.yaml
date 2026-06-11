@@ -40,7 +40,7 @@ optimizer:
 
 scheduler:
   warmup_steps: ${warmup_steps}
-  lr_scale: 0.3
+  lr_scale: 1
 
 training:
   use_amp: true

@@ -8,15 +8,16 @@ defaults:
 # ---- Model ------------------------------------------------
 model:
   _target_: src.models.transformer.Transformer
-  vocab_size: 32000
+  vocab_size: 37000
   d_model: 512
   num_layers: 6
   h: 8
-  d_ff: 1024
+  d_ff: 2048
   dropout: 0.1
-  max_len: 1024
+  max_len: 512
   activation_checkpointing: false
   activation_checkpointing_reentrant: false
+  
 
 # ---- Data -------------------------------------------------
 data:
@@ -44,12 +45,13 @@ optimizer:
 scheduler:
   use_noam: true
   d_model: ${model.d_model}   # interpolated from model section
-  warmup_steps: 20000
-  lr_scale: 0.5
+  warmup_steps: 4000
+  lr_scale: 1
 
 # ---- Training loop ----------------------------------------
 training:
   epochs: 15
+  max_steps: 100000             # optional override to set max steps instead of epochs
   label_smoothing: 0.1
   ignore_index: 0              # PAD_ID
   device: cuda                 # or "cpu"
@@ -57,13 +59,13 @@ training:
   amp_dtype: auto              # auto|bf16|fp16
   grad_clip_norm: 0.5
   max_skipped_steps_per_epoch: 1000
-  # skip_backoff_trigger: 20
   skip_backoff_trigger: 1000
   skip_backoff_factor: 0.5
   min_lr: 1.0e-6
   checkpoint_dir: checkpoints
   resume_from: null            # explicit checkpoint path; if null and auto_resume_latest=true, latest *.pt is used
   auto_resume_latest: true
+  resume_strict: false         # if true, fail on incompatible checkpoint; if false, start from scratch
   log_every: 500                # print every N optimizer steps
   validate_every: 1            # validate every N epochs
   save_every: 1                # save checkpoint every N epochs
@@ -73,7 +75,7 @@ training:
 # ---- Distributed ------------------------------------------
 distributed:
   enabled: false
-  backend: nccl
+  backend: nccl             # or "gloo" for CPU-only (not recommended for performance reasons)
   timeout_minutes: 30
 
 # ---- MLflow -----------------------------------------------

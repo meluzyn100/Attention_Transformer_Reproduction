@@ -207,20 +207,50 @@ class Trainer:
             return
         python_state = state.get("python")
         if python_state is not None:
-            random.setstate(python_state)
+            try:
+                random.setstate(python_state)
+            except Exception:
+                warnings.warn("failed to restore python RNG state; continuing")
         numpy_state = state.get("numpy")
         if numpy_state is not None:
-            np.random.set_state(numpy_state)
+            try:
+                np.random.set_state(numpy_state)
+            except Exception:
+                warnings.warn("failed to restore numpy RNG state; continuing")
         torch_state = state.get("torch")
         if torch_state is not None:
-            torch.set_rng_state(torch_state)
+            try:
+                if not isinstance(torch_state, torch.Tensor):
+                    torch_state = torch.tensor(torch_state, dtype=torch.uint8)
+                elif torch_state.dtype != torch.uint8:
+                    torch_state = torch_state.to(dtype=torch.uint8)
+                torch.set_rng_state(torch_state.cpu())
+            except Exception:
+                warnings.warn("failed to restore torch RNG state; continuing")
         if self.device.type == "cuda" and torch.cuda.is_available():
             cuda_state = state.get("cuda")
             if cuda_state is not None:
-                torch.cuda.set_rng_state(cuda_state, self.device)
+                try:
+                    if not isinstance(cuda_state, torch.Tensor):
+                        cuda_state = torch.tensor(cuda_state, dtype=torch.uint8)
+                    elif cuda_state.dtype != torch.uint8:
+                        cuda_state = cuda_state.to(dtype=torch.uint8)
+                    torch.cuda.set_rng_state(cuda_state.cpu(), self.device)
+                except Exception:
+                    warnings.warn("failed to restore CUDA RNG state; continuing")
             cuda_all = state.get("cuda_all")
             if cuda_all is not None:
-                torch.cuda.set_rng_state_all(cuda_all)
+                try:
+                    converted = []
+                    for entry in cuda_all:
+                        if not isinstance(entry, torch.Tensor):
+                            entry = torch.tensor(entry, dtype=torch.uint8)
+                        elif entry.dtype != torch.uint8:
+                            entry = entry.to(dtype=torch.uint8)
+                        converted.append(entry.cpu())
+                    torch.cuda.set_rng_state_all(converted)
+                except Exception:
+                    warnings.warn("failed to restore CUDA(all) RNG state; continuing")
 
     def get_performance_metrics(
         self,
