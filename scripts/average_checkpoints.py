@@ -47,10 +47,11 @@ def _latest_checkpoints(checkpoint_dir: Path, n_last: int) -> list[Path]:
 def average_checkpoints(input_paths: list[Path]) -> dict[str, torch.Tensor]:
     averaged: dict[str, torch.Tensor] = {}
     base_keys: set[str] | None = None
+    floating_dtypes: dict[str, torch.dtype] = {}
 
-    for idx, checkpoint_path in enumerate(input_paths):
-        payload = torch.load(checkpoint_path, map_location="cpu")
-        model_state = _extract_model_state(payload)
+    for checkpoint_index, checkpoint_path in enumerate(input_paths):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model_state = _extract_model_state(checkpoint)
 
         current_keys = set(model_state.keys())
         if base_keys is None:
@@ -68,18 +69,19 @@ def average_checkpoints(input_paths: list[Path]) -> dict[str, torch.Tensor]:
                 continue
 
             if tensor.is_floating_point() or tensor.is_complex():
+                floating_dtypes.setdefault(key, tensor.dtype)
                 value = tensor.detach().to(dtype=torch.float64)
                 if key not in averaged:
                     averaged[key] = value.clone()
                 else:
                     averaged[key].add_(value)
-            elif idx == 0:
+            elif checkpoint_index == 0:
                 averaged[key] = tensor.detach().clone()
 
     divisor = float(len(input_paths))
     for key, tensor in averaged.items():
         if tensor.is_floating_point() or tensor.is_complex():
-            averaged[key] = (tensor / divisor).to(dtype=torch.float32)
+            averaged[key] = (tensor / divisor).to(dtype=floating_dtypes[key])
 
     return averaged
 

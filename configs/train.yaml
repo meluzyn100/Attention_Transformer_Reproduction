@@ -76,7 +76,7 @@ mlflow:
   tags: {}
 
 # ---- Smoke test -------------------------------------------
-# python train.py smoke.enabled=true
+# Use `python train.py --config-name smoke` for the isolated smoke config.
 smoke:
   enabled: false
   steps: 50                             # gradient steps overfitting 1 batch

@@ -18,7 +18,7 @@ warmup_steps: 20000
 max_steps: 100000
 adam_beta2: 0.98
 
-# Simulated 25k-token effective batch (single/few GPU setup)
+# Approximate 25k-token effective batch on smaller hardware.
 batch_tokens: 4096
 accum_steps: 6
 
@@ -51,6 +51,6 @@ training:
   max_skipped_steps_per_epoch: 500
   min_lr: 1.0e-6
 data:
-  # Current dataloader is sample-based; token values are tracked for experiment metadata.
+  # The current dataloader batches by examples; keep token counts for experiment tracking.
   batch_size_tokens: ${batch_size_tokens}
   batch_tokens: ${batch_tokens}

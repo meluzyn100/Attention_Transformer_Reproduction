@@ -7,12 +7,9 @@ from typing import Any
 
 import torch
 from torch import nn
+import mlflow
 
-try:
-    import mlflow
-except Exception:  # pragma: no cover
-    mlflow = None
-
+from src.data.dataset import create_src_mask, create_tgt_mask
 
 @dataclass
 class TrainerState:
@@ -43,37 +40,29 @@ class Trainer:
         self.grad_clip_norm = grad_clip_norm
         self.accum_steps = max(1, int(accum_steps))
         self._accum_counter = 0
-        self.use_amp = bool(use_amp and self.device.type == "cuda" and torch.cuda.is_available())
+        self.use_amp = use_amp and self.device.type == "cuda" and torch.cuda.is_available()
         self.amp_dtype = self._resolve_amp_dtype(amp_dtype)
         self.use_grad_scaler = self.use_amp and self.amp_dtype == torch.float16
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
-        self.use_mlflow = use_mlflow and (mlflow is not None)
+        self.use_mlflow = use_mlflow
         self.state = TrainerState()
-
         self.model.to(self.device)
 
     def _resolve_amp_dtype(self, amp_dtype: str) -> torch.dtype | None:
         if not self.use_amp:
             return None
-
-        value = str(amp_dtype).lower().strip()
+        dtype = str(amp_dtype).lower().strip()
         bf16_supported = torch.cuda.is_bf16_supported()
-
-        if value == "auto":
+        if dtype == "auto":
             return torch.bfloat16 if bf16_supported else torch.float16
-        if value in {"bf16", "bfloat16"}:
+        if dtype in {"bf16", "bfloat16"}:
             if not bf16_supported:
-                warnings.warn(
-                    "Requested AMP bf16, but this CUDA device does not support bf16. "
-                    "Falling back to fp16.",
-                    RuntimeWarning,
-                )
+                warnings.warn("bf16 not supported, falling back to fp16", RuntimeWarning)
                 return torch.float16
             return torch.bfloat16
-        if value in {"fp16", "float16", "half"}:
+        if dtype in {"fp16", "float16", "half"}:
             return torch.float16
-
-        raise ValueError("amp_dtype must be one of: auto, bf16, fp16")
+        raise ValueError(f"amp_dtype must be auto, bf16, or fp16, got {dtype}")
 
     def _amp_context(self) -> torch.amp.autocast_mode.autocast:
         return torch.autocast(
@@ -88,29 +77,19 @@ class Trainer:
         if isinstance(value, dict):
             return {k: self._move_to_device(v) for k, v in value.items()}
         if isinstance(value, (list, tuple)):
-            moved = [self._move_to_device(v) for v in value]
-            return type(value)(moved) if isinstance(value, tuple) else moved
+            result = [self._move_to_device(v) for v in value]
+            return type(value)(result) if isinstance(value, tuple) else result
         return value
 
     def _split_batch(self, batch: Any) -> tuple[Any, torch.Tensor]:
-        if isinstance(batch, dict):
-            target_key = None
-            for key in ("labels", "label", "target", "targets", "y"):
-                if key in batch:
-                    target_key = key
-                    break
-            if target_key is None:
-                raise KeyError("Could not infer target key from batch dict")
-            target = batch[target_key]
-            model_inputs = {k: v for k, v in batch.items() if k != target_key}
-            return model_inputs, target
-
         if isinstance(batch, (list, tuple)) and len(batch) == 2:
             return batch[0], batch[1]
-
-        raise TypeError(
-            "Unsupported batch format. Use dict with labels/target or tuple(input, target)."
-        )
+        if isinstance(batch, dict):
+            target_key = next((k for k in ("labels", "label", "target", "targets", "y") if k in batch), None)
+            if target_key is None:
+                raise KeyError("batch dict missing target key (labels, target, etc.)")
+            return {k: v for k, v in batch.items() if k != target_key}, batch[target_key]
+        raise TypeError("batch must be tuple(input, target) or dict with target key")
 
     def _extract_logits(self, model_output: Any) -> torch.Tensor:
         if isinstance(model_output, torch.Tensor):
@@ -119,11 +98,9 @@ class Trainer:
             for key in ("logits", "output", "outputs"):
                 if key in model_output and isinstance(model_output[key], torch.Tensor):
                     return model_output[key]
-            raise KeyError("Could not find logits tensor in model output dict")
-        if isinstance(model_output, (list, tuple)) and len(model_output) > 0:
-            if isinstance(model_output[0], torch.Tensor):
-                return model_output[0]
-        raise TypeError("Unsupported model output format for logits extraction")
+        if isinstance(model_output, (tuple, list)) and isinstance(model_output[0], torch.Tensor):
+            return model_output[0]
+        raise TypeError(f"could not extract logits from {type(model_output)}")
 
     def _forward(self, inputs: Any) -> torch.Tensor:
         if isinstance(inputs, dict):
@@ -134,57 +111,40 @@ class Trainer:
             output = self.model(inputs)
         return self._extract_logits(output)
 
+    def _logits_and_targets(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        model_inputs, targets = self._split_batch(batch)
+        logits = self._forward(model_inputs)
+        return logits, targets
+
+    def _loss_for_batch(self, batch: Any) -> torch.Tensor:
+        logits, targets = self._logits_and_targets(batch)
+        return self.criterion(logits, targets)
+
     def _compute_grad_norm(self) -> float:
-        norms = []
-        for param in self.model.parameters():
-            if param.grad is not None:
-                norms.append(param.grad.detach().norm(2))
-        if not norms:
-            return 0.0
-        total_norm = torch.norm(torch.stack(norms), 2)
-        return float(total_norm.item())
+        total_norm_sq = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                total_norm_sq += p.grad.detach().norm(2).square().item()
+
+        return total_norm_sq ** 0.5
 
     def _current_lr(self) -> float:
-        return float(self.optimizer.param_groups[0]["lr"])
+        return self.optimizer.param_groups[0]["lr"]
 
     def _log_metrics(self, loss: float, grad_norm: float | None = None) -> None:
         if not self.use_mlflow:
             return
         metrics = {
-            "train/loss": float(loss),
+            "train/loss": loss,
             "train/lr": self._current_lr(),
         }
         if grad_norm is not None:
-            metrics["train/grad_norm"] = float(grad_norm)
+            metrics["train/grad_norm"] = grad_norm
         mlflow.log_metrics(metrics, step=self.state.global_step)
 
-    def train_step(self, batch: Any) -> tuple[float, float, bool]:
-        self.model.train()
-        if self._accum_counter == 0:
-            self.optimizer.zero_grad(set_to_none=True)
-
-        batch = self._move_to_device(batch)
-        model_inputs, targets = self._split_batch(batch)
-        with self._amp_context():
-            logits = self._forward(model_inputs)
-            loss = self.criterion(logits, targets)
-
-        if not torch.isfinite(loss):
-            self.state.skipped_steps += 1
-            self._accum_counter = 0
-            self.optimizer.zero_grad(set_to_none=True)
-            return float("nan"), float("nan"), False
-
-        raw_loss_value = float(loss.item())
-        loss = loss / self.accum_steps
-        if self.use_grad_scaler:
-            self.scaler.scale(loss).backward()
-        else:
-            loss.backward()
-
+    def _optimizer_step(self, raw_loss_value: float) -> tuple[float, float, bool]:
         self._accum_counter += 1
-        should_step = self._accum_counter >= self.accum_steps
-        if not should_step:
+        if self._accum_counter < self.accum_steps:
             return raw_loss_value, 0.0, False
 
         if self.use_grad_scaler:
@@ -197,17 +157,17 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             if self.use_grad_scaler:
                 self.scaler.update()
-            return raw_loss_value, float("nan"), False
+            return raw_loss_value, math.nan, False
 
         if self.grad_clip_norm is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
 
         optimizer_stepped = True
         if self.use_grad_scaler:
-            prev_scale = self.scaler.get_scale()
+            previous_scale = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            optimizer_stepped = self.scaler.get_scale() >= prev_scale
+            optimizer_stepped = self.scaler.get_scale() >= previous_scale
         else:
             self.optimizer.step()
 
@@ -217,11 +177,34 @@ class Trainer:
             self.scheduler.step()
         if not optimizer_stepped:
             self.state.skipped_steps += 1
+            return raw_loss_value, grad_norm, False
 
-        if optimizer_stepped:
-            self.state.global_step += 1
-            self._log_metrics(loss=raw_loss_value, grad_norm=grad_norm)
-        return raw_loss_value, float(grad_norm), optimizer_stepped
+        self.state.global_step += 1
+        self._log_metrics(loss=raw_loss_value, grad_norm=grad_norm)
+        return raw_loss_value, grad_norm, True
+
+    def train_step(self, batch: Any) -> tuple[float, float, bool]:
+        self.model.train()
+        if self._accum_counter == 0:
+            self.optimizer.zero_grad(set_to_none=True)
+
+        batch = self._move_to_device(batch)
+        with self._amp_context():
+            loss = self._loss_for_batch(batch)
+
+        if not torch.isfinite(loss):
+            self.state.skipped_steps += 1
+            self._accum_counter = 0
+            self.optimizer.zero_grad(set_to_none=True)
+            return math.nan, math.nan, False
+
+        raw_loss_value = loss.item()
+        loss = loss / self.accum_steps
+        if self.use_grad_scaler:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
+        return self._optimizer_step(raw_loss_value)
 
     @torch.no_grad()
     def validate(self, dataloader: torch.utils.data.DataLoader) -> float:
@@ -233,11 +216,9 @@ class Trainer:
             if batch is None:
                 continue
             batch = self._move_to_device(batch)
-            model_inputs, targets = self._split_batch(batch)
             with self._amp_context():
-                logits = self._forward(model_inputs)
-                loss = self.criterion(logits, targets)
-            running_loss += float(loss.item())
+                loss = self._loss_for_batch(batch)
+            running_loss += loss.item()
             n_batches += 1
 
         avg_loss = running_loss / max(1, n_batches)
@@ -269,3 +250,33 @@ class Trainer:
         state = checkpoint.get("state", {})
         self.state.global_step = int(state.get("global_step", 0))
         self.state.epoch = int(state.get("epoch", 0))
+
+
+class TranslationTrainer(Trainer):
+    """Seq2Seq trainer for Transformer translation with teacher forcing."""
+
+    def _unpack_batch(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            return batch[0], batch[1]
+        if isinstance(batch, dict):
+            src = batch.get("src") or batch.get("source")
+            tgt = batch.get("tgt") or batch.get("target") or batch.get("labels")
+            if src is None or tgt is None:
+                raise KeyError("Batch dict must contain 'src'/'source' and 'tgt'/'target' keys")
+            return src, tgt
+        raise TypeError(
+            f"Unsupported batch type {type(batch)}. "
+            "Expected (src, tgt) tuple or dict with src/tgt keys."
+        )
+
+    def _logits_and_targets(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        src_tokens, tgt_tokens = self._unpack_batch(batch)
+
+        tgt_in = tgt_tokens[:, :-1]
+        labels = tgt_tokens[:, 1:]
+
+        src_mask = create_src_mask(src_tokens).to(self.device)
+        tgt_mask = create_tgt_mask(tgt_in).to(self.device)
+
+        logits = self.model(src_tokens, tgt_in, src_mask=src_mask, tgt_mask=tgt_mask)
+        return logits, labels
