@@ -1,0 +1,10 @@
+# Ablation 4: No Label Smoothing
+# Hipoteza: wyższe perplexity, niższy BLEU — model overfits na top-1 token
+
+defaults:
+  - abl_base
+  - _self_
+
+training:
+  label_smoothing: 0.0
+  checkpoint_dir: checkpoints/ablations/no_smoothing

@@ -3,7 +3,22 @@ import torch.nn as nn
 
 from .embeddings import TokenEmbedding
 from .layers import DecoderLayer, EncoderLayer
-from .positional_encoding import SinusoidalPositionalEncoding
+from .positional_encoding import IdentityEncoding, LearnedPositionalEncoding, SinusoidalPositionalEncoding
+
+
+def _build_pe(
+    kind: str,
+    d_model: int,
+    dropout: float,
+    max_len: int,
+) -> torch.nn.Module:
+    if kind == "sinusoidal":
+        return SinusoidalPositionalEncoding(d_model=d_model, dropout=dropout, max_len=max_len)
+    if kind == "learned":
+        return LearnedPositionalEncoding(d_model=d_model, dropout=dropout, max_len=max_len)
+    if kind == "none":
+        return IdentityEncoding(dropout=dropout)
+    raise ValueError(f"positional_encoding must be 'sinusoidal', 'learned', or 'none', got {kind!r}")
 
 
 def initialize_weights(module: nn.Module) -> None:
@@ -23,12 +38,11 @@ class Encoder(nn.Module):
         d_ff: int = 2048,
         dropout: float = 0.1,
         max_len: int = 5000,
+        positional_encoding: str = "sinusoidal",
     ) -> None:
         super().__init__()
         self.embedding = TokenEmbedding(vocab_size, d_model)
-        self.positional_encoding = SinusoidalPositionalEncoding(
-            d_model=d_model, dropout=dropout, max_len=max_len
-        )
+        self.positional_encoding = _build_pe(positional_encoding, d_model, dropout, max_len)
 
         self.layers = nn.ModuleList(
             [
@@ -59,12 +73,11 @@ class Decoder(nn.Module):
         d_ff: int = 2048,
         dropout: float = 0.1,
         max_len: int = 5000,
+        positional_encoding: str = "sinusoidal",
     ) -> None:
         super().__init__()
         self.embedding = TokenEmbedding(vocab_size, d_model)
-        self.positional_encoding = SinusoidalPositionalEncoding(
-            d_model=d_model, dropout=dropout, max_len=max_len
-        )
+        self.positional_encoding = _build_pe(positional_encoding, d_model, dropout, max_len)
         self.layers = nn.ModuleList(
             [
                 DecoderLayer(d_model=d_model, h=h, d_ff=d_ff, dropout=dropout)
@@ -98,6 +111,7 @@ class Transformer(nn.Module):
         d_ff: int = 2048,
         dropout: float = 0.1,
         max_len: int = 5000,
+        positional_encoding: str = "sinusoidal",
     ) -> None:
         super().__init__()
         self.encoder = Encoder(
@@ -108,6 +122,7 @@ class Transformer(nn.Module):
             d_ff=d_ff,
             dropout=dropout,
             max_len=max_len,
+            positional_encoding=positional_encoding,
         )
         self.decoder = Decoder(
             vocab_size=vocab_size,
@@ -117,6 +132,7 @@ class Transformer(nn.Module):
             d_ff=d_ff,
             dropout=dropout,
             max_len=max_len,
+            positional_encoding=positional_encoding,
         )
         self.generator = nn.Linear(d_model, vocab_size)
 

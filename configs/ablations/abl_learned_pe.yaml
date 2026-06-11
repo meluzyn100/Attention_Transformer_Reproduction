@@ -1,0 +1,12 @@
+# Ablation 3: Learned Positional Encoding
+# Hipoteza: podobny BLEU ±1 pkt względem sinusoidal
+
+defaults:
+  - abl_base
+  - _self_
+
+model:
+  positional_encoding: learned
+
+training:
+  checkpoint_dir: checkpoints/ablations/learned_pe

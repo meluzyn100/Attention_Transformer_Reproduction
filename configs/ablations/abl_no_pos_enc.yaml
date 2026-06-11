@@ -1,0 +1,12 @@
+# Ablation 1: No Positional Encoding
+# Hipoteza: BLEU spada ~5-10 pkt — model traci informację kolejności
+
+defaults:
+  - abl_base
+  - _self_
+
+model:
+  positional_encoding: none
+
+training:
+  checkpoint_dir: checkpoints/ablations/no_pos_enc
