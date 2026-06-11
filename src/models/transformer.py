@@ -4,7 +4,11 @@ from torch.utils.checkpoint import checkpoint
 
 from .embeddings import TokenEmbedding
 from .layers import DecoderLayer, EncoderLayer
-from .positional_encoding import IdentityEncoding, LearnedPositionalEncoding, SinusoidalPositionalEncoding
+from .positional_encoding import (
+    IdentityEncoding,
+    LearnedPositionalEncoding,
+    SinusoidalPositionalEncoding,
+)
 
 
 def _build_pe(
@@ -14,12 +18,18 @@ def _build_pe(
     max_len: int,
 ) -> torch.nn.Module:
     if kind == "sinusoidal":
-        return SinusoidalPositionalEncoding(d_model=d_model, dropout=dropout, max_len=max_len)
+        return SinusoidalPositionalEncoding(
+            d_model=d_model, dropout=dropout, max_len=max_len
+        )
     if kind == "learned":
-        return LearnedPositionalEncoding(d_model=d_model, dropout=dropout, max_len=max_len)
+        return LearnedPositionalEncoding(
+            d_model=d_model, dropout=dropout, max_len=max_len
+        )
     if kind == "none":
         return IdentityEncoding(dropout=dropout)
-    raise ValueError(f"positional_encoding must be 'sinusoidal', 'learned', or 'none', got {kind!r}")
+    raise ValueError(
+        f"positional_encoding must be 'sinusoidal', 'learned', or 'none', got {kind!r}"
+    )
 
 
 def initialize_weights(module: nn.Module) -> None:
@@ -45,7 +55,9 @@ class Encoder(nn.Module):
     ) -> None:
         super().__init__()
         self.embedding = TokenEmbedding(vocab_size, d_model)
-        self.positional_encoding = _build_pe(positional_encoding, d_model, dropout, max_len)
+        self.positional_encoding = _build_pe(
+            positional_encoding, d_model, dropout, max_len
+        )
 
         self.layers = nn.ModuleList(
             [
@@ -92,7 +104,9 @@ class Decoder(nn.Module):
     ) -> None:
         super().__init__()
         self.embedding = TokenEmbedding(vocab_size, d_model)
-        self.positional_encoding = _build_pe(positional_encoding, d_model, dropout, max_len)
+        self.positional_encoding = _build_pe(
+            positional_encoding, d_model, dropout, max_len
+        )
         self.layers = nn.ModuleList(
             [
                 DecoderLayer(d_model=d_model, h=h, d_ff=d_ff, dropout=dropout)
@@ -128,7 +142,9 @@ class Decoder(nn.Module):
                     use_reentrant=self.activation_checkpointing_reentrant,
                 )
             else:
-                x = layer(x, enc_output=enc_output, src_mask=src_mask, tgt_mask=tgt_mask)
+                x = layer(
+                    x, enc_output=enc_output, src_mask=src_mask, tgt_mask=tgt_mask
+                )
 
         return x
 

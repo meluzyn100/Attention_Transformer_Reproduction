@@ -39,7 +39,7 @@ download-data:
 train-tokenizer:
 	@echo "Training shared BPE tokenizer (default 32k vocab, sample 10k lines)..."
 	python -m scripts.train_tokenizer --raw-dir data/raw/wmt14_de_en --output-dir data/processed/bpe --vocab-size 32000 --sample-size 0
-
+ 
 install:
 	python -m pip install -e '.[dev]'
 
@@ -62,13 +62,13 @@ train-ddp-8:
 	torchrun --standalone --nproc_per_node=8 train.py distributed.enabled=true training.device=cuda
 
 train-ddp-short-2:
-	torchrun --standalone --nproc_per_node=2 train.py distributed.enabled=true training.device=cuda mlflow.enabled=false training.auto_resume_latest=false +training.max_steps=100 training.log_every=10 training.validate_every=1000 training.save_every=1000 data.max_train_samples=2000 data.batch_size=4
+	torchrun --standalone --nproc_per_node=2 train.py distributed.enabled=true training.device=cuda mlflow.enabled=false training.auto_resume_latest=false training.max_steps=100 training.log_every=10 training.validate_every=1000 training.save_every=1000 data.max_train_samples=2000 data.batch_size=4
 
 train-ddp-short-4:
-	torchrun --standalone --nproc_per_node=4 train.py distributed.enabled=true training.device=cuda mlflow.enabled=false training.auto_resume_latest=false +training.max_steps=100 training.log_every=10 training.validate_every=1000 training.save_every=1000 data.max_train_samples=2000 data.batch_size=2
+	torchrun --standalone --nproc_per_node=4 train.py distributed.enabled=true training.device=cuda mlflow.enabled=false training.auto_resume_latest=false training.max_steps=100 training.log_every=10 training.validate_every=1000 training.save_every=1000 data.max_train_samples=2000 data.batch_size=2
 
 train-ddp-short-8:
-	torchrun --standalone --nproc_per_node=8 train.py distributed.enabled=true training.device=cuda mlflow.enabled=false training.auto_resume_latest=false +training.max_steps=100 training.log_every=10 training.validate_every=1000 training.save_every=1000 data.max_train_samples=2000 data.batch_size=1
+	torchrun --standalone --nproc_per_node=8 train.py distributed.enabled=true training.device=cuda mlflow.enabled=false training.auto_resume_latest=false training.max_steps=100 training.log_every=10 training.validate_every=1000 training.save_every=1000 data.max_train_samples=2000 data.batch_size=1
 
 average-base:
 # 	make average-base CHECKPOINT_DIR=checkpoints/check0dir

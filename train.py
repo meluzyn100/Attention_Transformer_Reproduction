@@ -389,7 +389,7 @@ def run_training(
                         ]
                     if rank0:
                         print(
-                        f"epoch={epoch+1} step={trainer.state.global_step} LR backoff: {old_lr:.2e} -> {new_lr:.2e}"
+                            f"epoch={epoch+1} step={trainer.state.global_step} LR backoff: {old_lr:.2e} -> {new_lr:.2e}"
                         )
                     if trainer.use_mlflow:
                         mlflow.log_metric(
@@ -474,7 +474,9 @@ def run_training(
             if rank0:
                 print(f"epoch={epoch+1} val_loss={val_loss:.6f}")
             if trainer.use_mlflow:
-                mlflow.log_metric("val/loss_reduced", val_loss, step=trainer.state.global_step)
+                mlflow.log_metric(
+                    "val/loss_reduced", val_loss, step=trainer.state.global_step
+                )
 
         if (epoch + 1) % save_every == 0:
             checkpoint_path = checkpoint_dir / f"epoch_{epoch+1:03d}.pt"
@@ -507,7 +509,9 @@ def main(cfg: DictConfig) -> None:
             timeout_minutes=int(cfg.distributed.timeout_minutes),
         )
         if bool(cfg.distributed.enabled) and not ddp_active and is_rank0():
-            print("distributed.enabled=true but no distributed process group found; running single-process")
+            print(
+                "distributed.enabled=true but no distributed process group found; running single-process"
+            )
         cfg.training.device = resolve_device(cfg)
         rank = get_rank()
         set_seed(int(cfg.training.seed), rank=rank)
@@ -523,7 +527,9 @@ def main(cfg: DictConfig) -> None:
             )
 
         resume_path = cfg.training.get("resume_from")
-        should_auto_resume = bool(cfg.training.get("auto_resume_latest", True)) and not bool(cfg.smoke.enabled)
+        should_auto_resume = bool(
+            cfg.training.get("auto_resume_latest", True)
+        ) and not bool(cfg.smoke.enabled)
         resume_strict = bool(cfg.training.get("resume_strict", False))
         if should_auto_resume and not resume_path:
             latest = find_latest_checkpoint(cfg.training.checkpoint_dir)
@@ -554,7 +560,9 @@ def main(cfg: DictConfig) -> None:
             if is_rank0():
                 print(f"saved smoke checkpoint: {path}")
         else:
-            run_training(trainer, train_loader, val_loader, cfg, train_sampler=train_sampler)
+            run_training(
+                trainer, train_loader, val_loader, cfg, train_sampler=train_sampler
+            )
     except KeyboardInterrupt:
         if is_rank0():
             print("Training interrupted (Ctrl+C).")

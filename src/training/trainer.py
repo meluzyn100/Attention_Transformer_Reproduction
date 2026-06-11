@@ -295,7 +295,9 @@ class Trainer:
                         text=True,
                     )
                     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-                    rows = [line.strip() for line in output.splitlines() if line.strip()]
+                    rows = [
+                        line.strip() for line in output.splitlines() if line.strip()
+                    ]
                     if rows:
                         util = float(rows[min(local_rank, len(rows) - 1)])
                 except Exception:  # pragma: no cover - best effort

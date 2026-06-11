@@ -42,9 +42,11 @@ class BeamSearch:
         self.bos_id = bos_id
         self.eos_id = eos_id
         self.pad_id = pad_id
-        self.device = torch.device(device) if device is not None else next(
-            model.parameters()
-        ).device
+        self.device = (
+            torch.device(device)
+            if device is not None
+            else next(model.parameters()).device
+        )
 
     def _length_penalty(self, length: int) -> float:
         return ((5.0 + length) ** self.alpha) / ((5.0 + 1.0) ** self.alpha)
@@ -69,12 +71,18 @@ class BeamSearch:
         if src_tokens.dim() == 1:
             src_tokens = src_tokens.unsqueeze(0)
         if src_tokens.dim() != 2:
-            raise ValueError("src_tokens must have shape (batch, src_len) or (src_len,)")
+            raise ValueError(
+                "src_tokens must have shape (batch, src_len) or (src_len,)"
+            )
         if src_tokens.size(0) != 1:
             raise ValueError("BeamSearch.search expects a single source example")
 
         src_tokens = src_tokens.to(self.device)
-        src_mask = create_src_mask(src_tokens) if src_mask is None else src_mask.to(self.device)
+        src_mask = (
+            create_src_mask(src_tokens)
+            if src_mask is None
+            else src_mask.to(self.device)
+        )
 
         self.model.eval()
         encoder = getattr(self.model, "encoder")
@@ -116,7 +124,9 @@ class BeamSearch:
             candidates: list[_Beam] = []
             for row_index, beam in enumerate(unfinished):
                 values, indices = torch.topk(log_probs[row_index], self.beam_size)
-                for token_log_prob, token_id in zip(values.tolist(), indices.tolist(), strict=True):
+                for token_log_prob, token_id in zip(
+                    values.tolist(), indices.tolist(), strict=True
+                ):
                     next_tokens = [*beam.tokens, int(token_id)]
                     candidate = _Beam(
                         tokens=next_tokens,
@@ -138,5 +148,7 @@ class BeamSearch:
             active = candidates[: self.beam_size]
 
         pool = finished or active
-        best = max(pool, key=lambda beam: self._score(beam.log_prob, len(beam.tokens) - 1))
+        best = max(
+            pool, key=lambda beam: self._score(beam.log_prob, len(beam.tokens) - 1)
+        )
         return self._finalize(best.tokens)

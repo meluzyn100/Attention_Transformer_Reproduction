@@ -45,14 +45,23 @@ def load_examples(path: str | Path) -> list[TranslationExample]:
                 if not line.strip():
                     continue
                 record = json.loads(line)["translation"]
-                examples.append(TranslationExample(source=record["de"], reference=record.get("en")))
+                examples.append(
+                    TranslationExample(source=record["de"], reference=record.get("en"))
+                )
         return examples
 
     source_path = path
     reference_path = path.with_suffix(".en.txt")
     sources = source_path.read_text(encoding="utf-8").splitlines()
-    references = reference_path.read_text(encoding="utf-8").splitlines() if reference_path.exists() else [None] * len(sources)
-    return [TranslationExample(source=src, reference=ref) for src, ref in zip(sources, references, strict=True)]
+    references = (
+        reference_path.read_text(encoding="utf-8").splitlines()
+        if reference_path.exists()
+        else [None] * len(sources)
+    )
+    return [
+        TranslationExample(source=src, reference=ref)
+        for src, ref in zip(sources, references, strict=True)
+    ]
 
 
 def resolve_path(path: str | Path, root: Path) -> Path:
@@ -127,7 +136,9 @@ def generate_translations(
             src_mask = create_src_mask(src_tokens)
             token_ids = search.search(src_tokens, src_mask=src_mask)
             hypotheses.append(tokenizer.decode(token_ids))
-        references.extend(reference for reference in batch_references if reference is not None)
+        references.extend(
+            reference for reference in batch_references if reference is not None
+        )
 
     return hypotheses, references
 
