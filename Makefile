@@ -1,6 +1,7 @@
 .PHONY: help install lint format test ci act clean download-data train-tokenizer train train-base train-ddp-2 train-ddp-4 train-ddp-8 train-ddp-short-2 train-ddp-short-4 train-ddp-short-8 smoke-ddp-2 smoke-ddp-preflight smoke-ddp-cpu-preflight average-base smoke train-mlflow mlflow-ui evaluate evaluate-base evaluate-single
 
 EVAL_CONFIG ?= evaluate_base
+CHECKPOINT_DIR ?= checkpoints/base_en_de
 
 help:
 	@echo "Targets:"
@@ -73,7 +74,7 @@ train-ddp-short-8:
 average-base:
 # 	make average-base CHECKPOINT_DIR=checkpoints/check0dir
 # 	python scripts/average_checkpoints.py --checkpoint-dir checkpoints/base_en_de --n-last 5 --output checkpoints/base_en_de/averaged.pt
-	python scripts/average_checkpoints.py --checkpoint-dir $(CHECKPOINT_DIR) --n-last 5 --output checkpoints/base_en_de/averaged.pt
+	python scripts/average_checkpoints.py --checkpoint-dir $(CHECKPOINT_DIR) --n-last 5 --output $(CHECKPOINT_DIR)/averaged.pt
 
 smoke:
 	python train.py --config-name smoke
