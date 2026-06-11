@@ -383,7 +383,11 @@ class Trainer:
     def load_checkpoint(
         self, path: str | Path, map_location: str | None = None
     ) -> None:
-        checkpoint = torch.load(path, map_location=map_location or str(self.device))
+        checkpoint = torch.load(
+            path,
+            map_location=map_location or str(self.device),
+            weights_only=False,
+        )
         self._load_model_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         if self.scheduler is not None and checkpoint.get("scheduler") is not None:

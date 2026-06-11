@@ -36,10 +36,14 @@ def init_distributed(backend: str = "nccl", timeout_minutes: int = 30) -> bool:
     if is_distributed():
         return True
 
-    dist.init_process_group(
-        backend=backend,
-        timeout=datetime.timedelta(minutes=int(timeout_minutes)),
-    )
+    kwargs = {
+        "backend": backend,
+        "timeout": datetime.timedelta(minutes=int(timeout_minutes)),
+    }
+    if backend == "nccl" and torch.cuda.is_available():
+        kwargs["device_id"] = torch.device("cuda", get_local_rank())
+
+    dist.init_process_group(**kwargs)
     return True
 
 

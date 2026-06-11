@@ -1,6 +1,10 @@
-.PHONY: help install lint format test ci act clean download-data train-tokenizer train train-base train-ddp-2 train-ddp-4 train-ddp-8 smoke-ddp-preflight smoke-ddp-cpu-preflight average-base smoke train-mlflow mlflow-ui evaluate evaluate-base evaluate-single
+.PHONY: help install lint format test ci act clean download-data train-tokenizer train train-base train-ddp-2 train-ddp-4 train-ddp-8 train-ddp-short-2 train-ddp-short-4 train-ddp-short-8 smoke-ddp-2 smoke-ddp-preflight smoke-ddp-cpu-preflight average-base smoke train-mlflow mlflow-ui evaluate evaluate-base evaluate-single
 
 EVAL_CONFIG ?= evaluate_base
+DDP_PROFILE ?= single_node_nccl
+DDP_SHORT_STEPS ?= 100
+DDP_SHORT_MAX_SAMPLES ?= 2000
+DDP_SHORT_LOG_EVERY ?= 10
 
 help:
 	@echo "Targets:"
@@ -9,9 +13,14 @@ help:
 	@echo "  train-tokenizer  Train the shared BPE tokenizer"
 	@echo "  train    Run the default training config"
 	@echo "  train-base  Run Base EN-DE training config (Phase 4)"
+	@echo "  distributed profile: override DDP_PROFILE (default: single_node_nccl)"
+	@echo "  smoke-ddp-2  Run smoke config via torchrun on 2 GPUs"
 	@echo "  train-ddp-2  Run default training via torchrun on 2 GPUs"
 	@echo "  train-ddp-4  Run default training via torchrun on 4 GPUs"
 	@echo "  train-ddp-8  Run default training via torchrun on 8 GPUs"
+	@echo "  train-ddp-short-2  Run short DDP training validation on 2 GPUs"
+	@echo "  train-ddp-short-4  Run short DDP training validation on 4 GPUs"
+	@echo "  train-ddp-short-8  Run short DDP training validation on 8 GPUs"
 	@echo "  smoke-ddp-preflight  Run smoke with torchrun nproc=1 (DDP path preflight)"
 	@echo "  smoke-ddp-cpu-preflight  Run smoke with torchrun nproc=2 on CPU/Gloo"
 	@echo "  average-base  Average last N base checkpoints into averaged.pt"
@@ -45,14 +54,26 @@ train:
 train-base:
 	python train.py --config-name=base_en_de
 
+smoke-ddp-2:
+	torchrun --standalone --nproc_per_node=2 train.py --config-name smoke distributed=$(DDP_PROFILE) training.device=cuda smoke.steps=20 mlflow.enabled=false
+
 train-ddp-2:
-	torchrun --standalone --nproc_per_node=2 train.py distributed.enabled=true training.device=cuda
+	torchrun --standalone --nproc_per_node=2 train.py distributed=$(DDP_PROFILE) training.device=cuda
 
 train-ddp-4:
-	torchrun --standalone --nproc_per_node=4 train.py distributed.enabled=true training.device=cuda
+	torchrun --standalone --nproc_per_node=4 train.py distributed=$(DDP_PROFILE) training.device=cuda
 
 train-ddp-8:
-	torchrun --standalone --nproc_per_node=8 train.py distributed.enabled=true training.device=cuda
+	torchrun --standalone --nproc_per_node=8 train.py distributed=$(DDP_PROFILE) training.device=cuda
+
+train-ddp-short-2:
+	torchrun --standalone --nproc_per_node=2 train.py distributed=$(DDP_PROFILE) training.device=cuda mlflow.enabled=false training.auto_resume_latest=false +training.max_steps=$(DDP_SHORT_STEPS) training.log_every=$(DDP_SHORT_LOG_EVERY) training.validate_every=1000 training.save_every=1000 data.max_train_samples=$(DDP_SHORT_MAX_SAMPLES) data.batch_size=4
+
+train-ddp-short-4:
+	torchrun --standalone --nproc_per_node=4 train.py distributed=$(DDP_PROFILE) training.device=cuda mlflow.enabled=false training.auto_resume_latest=false +training.max_steps=$(DDP_SHORT_STEPS) training.log_every=$(DDP_SHORT_LOG_EVERY) training.validate_every=1000 training.save_every=1000 data.max_train_samples=$(DDP_SHORT_MAX_SAMPLES) data.batch_size=2
+
+train-ddp-short-8:
+	torchrun --standalone --nproc_per_node=8 train.py distributed=$(DDP_PROFILE) training.device=cuda mlflow.enabled=false training.auto_resume_latest=false +training.max_steps=$(DDP_SHORT_STEPS) training.log_every=$(DDP_SHORT_LOG_EVERY) training.validate_every=1000 training.save_every=1000 data.max_train_samples=$(DDP_SHORT_MAX_SAMPLES) data.batch_size=1
 
 average-base:
 # 	make average-base CHECKPOINT_DIR=checkpoints/check0dir
@@ -63,10 +84,10 @@ smoke:
 	python train.py --config-name smoke
 
 smoke-ddp-preflight:
-	torchrun --standalone --nproc_per_node=1 train.py --config-name smoke distributed.enabled=true training.device=cuda
+	torchrun --standalone --nproc_per_node=1 train.py --config-name smoke distributed=$(DDP_PROFILE) training.device=cuda
 
 smoke-ddp-cpu-preflight:
-	torchrun --standalone --nproc_per_node=2 train.py --config-name smoke distributed.enabled=true distributed.backend=gloo training.device=cpu
+	torchrun --standalone --nproc_per_node=2 train.py --config-name smoke distributed=$(DDP_PROFILE) distributed.backend=gloo training.device=cpu
 
 evaluate:
 	python -m src.evaluation.generate --config-name $(EVAL_CONFIG)
