@@ -4,6 +4,7 @@ hydra-core>=1.3
 tqdm>=4.0
 datasets>=4.0
 tokenizers>=0.22
+sacrebleu>=2.5
 mlflow>=3.0
 
 # Dev / testing / formatting

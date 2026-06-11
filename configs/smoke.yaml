@@ -38,3 +38,6 @@ data:
   max_train_samples: 100
   batch_size: 4
   num_workers: 0
+
+distributed:
+  enabled: false

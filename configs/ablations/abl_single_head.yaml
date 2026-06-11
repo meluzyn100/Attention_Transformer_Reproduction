@@ -1,0 +1,13 @@
+# Ablation 2: Single Head Attention
+# Hipoteza: BLEU spada ~2-5 pkt — wolniejsza konwergencja, słabsze reprezentacje
+
+defaults:
+  - abl_base
+  - _self_
+
+model:
+  h: 1
+
+training:
+  checkpoint_dir: checkpoints/ablations/single_head
+  epochs: 12

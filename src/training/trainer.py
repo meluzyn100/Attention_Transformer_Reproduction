@@ -1,14 +1,23 @@
 import math
+import os
+import subprocess
+import random
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch import nn
 import mlflow
 
 from src.data.dataset import create_src_mask, create_tgt_mask
+
+try:
+    import pynvml
+except Exception:  # pragma: no cover - optional dependency
+    pynvml = None
 
 
 @dataclass
@@ -31,6 +40,9 @@ class Trainer:
         use_amp: bool = False,
         amp_dtype: str = "auto",
         use_mlflow: bool = True,
+        rank: int = 0,
+        world_size: int = 1,
+        gpu_monitoring: bool = True,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -47,8 +59,20 @@ class Trainer:
         self.use_grad_scaler = self.use_amp and self.amp_dtype == torch.float16
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
         self.use_mlflow = use_mlflow
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        self.gpu_monitoring = gpu_monitoring and self.device.type == "cuda"
+        self._nvml_handle = None
         self.state = TrainerState()
         self.model.to(self.device)
+
+        if self.gpu_monitoring and pynvml is not None:
+            try:
+                pynvml.nvmlInit()
+                index = torch.cuda.current_device() if torch.cuda.is_available() else 0
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            except Exception:  # pragma: no cover - best effort
+                self._nvml_handle = None
 
     def _resolve_amp_dtype(self, amp_dtype: str) -> torch.dtype | None:
         if not self.use_amp:
@@ -147,7 +171,7 @@ class Trainer:
         return self.optimizer.param_groups[0]["lr"]
 
     def _log_metrics(self, loss: float, grad_norm: float | None = None) -> None:
-        if not self.use_mlflow:
+        if not self.use_mlflow or self.rank != 0:
             return
         metrics = {
             "train/loss": loss,
@@ -156,6 +180,131 @@ class Trainer:
         if grad_norm is not None:
             metrics["train/grad_norm"] = grad_norm
         mlflow.log_metrics(metrics, step=self.state.global_step)
+
+    def _model_state_dict(self) -> dict[str, Any]:
+        module = self.model.module if hasattr(self.model, "module") else self.model
+        return module.state_dict()
+
+    def _load_model_state_dict(self, state_dict: dict[str, Any]) -> None:
+        module = self.model.module if hasattr(self.model, "module") else self.model
+        module.load_state_dict(state_dict)
+
+    def _collect_rng_state(self) -> dict[str, Any]:
+        state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": None,
+            "cuda_all": None,
+        }
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            state["cuda"] = torch.cuda.get_rng_state(self.device)
+            state["cuda_all"] = torch.cuda.get_rng_state_all()
+        return state
+
+    def _restore_rng_state(self, state: dict[str, Any] | None) -> None:
+        if not state:
+            return
+        python_state = state.get("python")
+        if python_state is not None:
+            try:
+                random.setstate(python_state)
+            except Exception:
+                warnings.warn("failed to restore python RNG state; continuing")
+        numpy_state = state.get("numpy")
+        if numpy_state is not None:
+            try:
+                np.random.set_state(numpy_state)
+            except Exception:
+                warnings.warn("failed to restore numpy RNG state; continuing")
+        torch_state = state.get("torch")
+        if torch_state is not None:
+            try:
+                if not isinstance(torch_state, torch.Tensor):
+                    torch_state = torch.tensor(torch_state, dtype=torch.uint8)
+                elif torch_state.dtype != torch.uint8:
+                    torch_state = torch_state.to(dtype=torch.uint8)
+                torch.set_rng_state(torch_state.cpu())
+            except Exception:
+                warnings.warn("failed to restore torch RNG state; continuing")
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            cuda_state = state.get("cuda")
+            if cuda_state is not None:
+                try:
+                    if not isinstance(cuda_state, torch.Tensor):
+                        cuda_state = torch.tensor(cuda_state, dtype=torch.uint8)
+                    elif cuda_state.dtype != torch.uint8:
+                        cuda_state = cuda_state.to(dtype=torch.uint8)
+                    torch.cuda.set_rng_state(cuda_state.cpu(), self.device)
+                except Exception:
+                    warnings.warn("failed to restore CUDA RNG state; continuing")
+            cuda_all = state.get("cuda_all")
+            if cuda_all is not None:
+                try:
+                    converted = []
+                    for entry in cuda_all:
+                        if not isinstance(entry, torch.Tensor):
+                            entry = torch.tensor(entry, dtype=torch.uint8)
+                        elif entry.dtype != torch.uint8:
+                            entry = entry.to(dtype=torch.uint8)
+                        converted.append(entry.cpu())
+                    torch.cuda.set_rng_state_all(converted)
+                except Exception:
+                    warnings.warn("failed to restore CUDA(all) RNG state; continuing")
+
+    def get_performance_metrics(
+        self,
+        *,
+        samples: int,
+        tokens: int,
+        step_time_s: float,
+        data_time_s: float,
+    ) -> dict[str, float]:
+        metrics = {
+            "perf/step_time_s": float(step_time_s),
+            "perf/data_time_s": float(data_time_s),
+            "perf/samples_per_s": float(samples / max(step_time_s, 1.0e-8)),
+            "perf/tokens_per_s": float(tokens / max(step_time_s, 1.0e-8)),
+        }
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            metrics["gpu/memory_allocated_mb"] = float(
+                torch.cuda.memory_allocated(self.device) / (1024**2)
+            )
+            metrics["gpu/memory_reserved_mb"] = float(
+                torch.cuda.memory_reserved(self.device) / (1024**2)
+            )
+            metrics["gpu/max_memory_allocated_mb"] = float(
+                torch.cuda.max_memory_allocated(self.device) / (1024**2)
+            )
+            util = None
+            if self._nvml_handle is not None and pynvml is not None:
+                try:
+                    util = float(
+                        pynvml.nvmlDeviceGetUtilizationRates(self._nvml_handle).gpu
+                    )
+                except Exception:  # pragma: no cover - best effort
+                    util = None
+            elif self.gpu_monitoring:
+                try:
+                    output = subprocess.check_output(
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=utilization.gpu",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        text=True,
+                    )
+                    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                    rows = [
+                        line.strip() for line in output.splitlines() if line.strip()
+                    ]
+                    if rows:
+                        util = float(rows[min(local_rank, len(rows) - 1)])
+                except Exception:  # pragma: no cover - best effort
+                    util = None
+            if util is not None:
+                metrics["gpu/utilization_pct"] = util
+        return metrics
 
     def _optimizer_step(self, raw_loss_value: float) -> tuple[float, float, bool]:
         self._accum_counter += 1
@@ -237,38 +386,53 @@ class Trainer:
             n_batches += 1
 
         avg_loss = running_loss / max(1, n_batches)
-        if self.use_mlflow:
+        if self.use_mlflow and self.rank == 0:
             mlflow.log_metric("val/loss", avg_loss, step=self.state.global_step)
         return avg_loss
 
     def save_checkpoint(self, path: str | Path) -> None:
+        if self.rank != 0:
+            return
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "model": self.model.state_dict(),
+            "model": self._model_state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": (
                 self.scheduler.state_dict() if self.scheduler is not None else None
             ),
+            "scaler": self.scaler.state_dict() if self.use_grad_scaler else None,
             "state": {
                 "global_step": self.state.global_step,
                 "epoch": self.state.epoch,
+                "skipped_steps": self.state.skipped_steps,
+                "accum_counter": self._accum_counter,
             },
+            "rng_state": self._collect_rng_state(),
         }
         torch.save(payload, path)
 
     def load_checkpoint(
         self, path: str | Path, map_location: str | None = None
     ) -> None:
-        checkpoint = torch.load(path, map_location=map_location or str(self.device))
-        self.model.load_state_dict(checkpoint["model"])
+        checkpoint = torch.load(
+            path,
+            map_location=map_location or str(self.device),
+            weights_only=False,
+        )
+        self._load_model_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         if self.scheduler is not None and checkpoint.get("scheduler") is not None:
             self.scheduler.load_state_dict(checkpoint["scheduler"])
+        if self.use_grad_scaler and checkpoint.get("scaler") is not None:
+            self.scaler.load_state_dict(checkpoint["scaler"])
 
         state = checkpoint.get("state", {})
         self.state.global_step = int(state.get("global_step", 0))
         self.state.epoch = int(state.get("epoch", 0))
+        self.state.skipped_steps = int(state.get("skipped_steps", 0))
+        self._accum_counter = int(state.get("accum_counter", 0))
+        self._restore_rng_state(checkpoint.get("rng_state"))
 
 
 class TranslationTrainer(Trainer):

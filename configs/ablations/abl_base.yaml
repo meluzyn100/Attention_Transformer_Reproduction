@@ -1,0 +1,45 @@
+# ============================================================
+# Base ablation config — mały model, szybki trening
+# Dziedziczone przez wszystkie exp configs
+# ============================================================
+
+defaults:
+  - /train
+  - _self_
+
+model:
+  _target_: src.models.transformer.Transformer
+  vocab_size: 32000
+  d_model: 256
+  num_layers: 3
+  h: 4
+  d_ff: 512
+  dropout: 0.1
+  max_len: 256
+  positional_encoding: sinusoidal
+
+data:
+  max_train_samples: 2000
+  batch_size: 16
+  num_workers: 0
+
+scheduler:
+  use_noam: true
+  d_model: ${model.d_model}
+  warmup_steps: 400
+  lr_scale: 1.0
+
+training:
+  epochs: 10
+  label_smoothing: 0.1
+  device: cuda
+  use_amp: false
+  grad_clip_norm: 1.0
+  checkpoint_dir: checkpoints/ablations/baseline
+  save_every: 5
+  validate_every: 2
+  log_every: 50
+  seed: 42
+
+mlflow:
+  enabled: false
