@@ -30,15 +30,31 @@ class TranslationDataset(Dataset[tuple[list[int], list[int]]]):
 
 
 def collate_fn(
-    batch: Sequence[tuple[list[int], list[int]]], pad_id: int = PAD_ID
-) -> tuple[torch.Tensor, torch.Tensor]:
-    source_sequences, target_sequences = zip(*batch, strict=True)
+    batch: Sequence[tuple[list[int], list[int]]],
+    pad_id: int = PAD_ID,
+    max_length: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if max_length is not None and max_length < 2:
+        raise ValueError("max_length must be at least 2 when filtering is enabled")
+
+    filtered_batch = [
+        example
+        for example in batch
+        if max_length is None
+        or (len(example[0]) <= max_length and len(example[1]) <= max_length)
+    ]
+
+    if not filtered_batch:
+        return None
+
+    source_sequences, target_sequences = zip(*filtered_batch, strict=True)
 
     source_max_len = max(len(sequence) for sequence in source_sequences)
     target_max_len = max(len(sequence) for sequence in target_sequences)
 
-    source_batch = torch.full((len(batch), source_max_len), pad_id, dtype=torch.long)
-    target_batch = torch.full((len(batch), target_max_len), pad_id, dtype=torch.long)
+    batch_size = len(filtered_batch)
+    source_batch = torch.full((batch_size, source_max_len), pad_id, dtype=torch.long)
+    target_batch = torch.full((batch_size, target_max_len), pad_id, dtype=torch.long)
 
     for row_index, sequence in enumerate(source_sequences):
         source_batch[row_index, : len(sequence)] = torch.tensor(

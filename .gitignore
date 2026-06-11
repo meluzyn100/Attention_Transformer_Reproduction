@@ -82,6 +82,11 @@ target/
 data/raw/
 data/interim/
 data/processed/
+checkpoints/
+outputs/
+mlruns/
+mlartifacts/
+mlflow.db
 
 # IPython
 profile_default/

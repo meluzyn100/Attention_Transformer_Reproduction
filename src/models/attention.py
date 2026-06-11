@@ -27,6 +27,9 @@ def scaled_dot_product_attention(
 
         # Softmax will convert -inf to 0, effectively zeroing out masked positions
     attention_weights = F.softmax(scores, dim=-1)
+    attention_weights = torch.nan_to_num(
+        attention_weights, nan=0.0, posinf=0.0, neginf=0.0
+    )
 
     # Apply dropout to attention weights during training
     attention_weights = F.dropout(attention_weights, p=dropout_p, training=training)
