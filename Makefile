@@ -1,4 +1,6 @@
-.PHONY: help install lint format test ci act clean download-data train-tokenizer train train-base average-base smoke train-mlflow mlflow-ui
+.PHONY: help install lint format test ci act clean download-data train-tokenizer train train-base average-base smoke train-mlflow mlflow-ui evaluate evaluate-base evaluate-single
+
+EVAL_CONFIG ?= evaluate_base
 
 help:
 	@echo "Targets:"
@@ -9,6 +11,9 @@ help:
 	@echo "  train-base  Run Base EN-DE training config (Phase 4)"
 	@echo "  average-base  Average last N base checkpoints into averaged.pt"
 	@echo "  smoke    Run the smoke-test config"
+	@echo "  evaluate  Run evaluation using EVAL_CONFIG"
+	@echo "  evaluate-base  Run the averaged base checkpoint evaluation"
+	@echo "  evaluate-single  Run a representative single-checkpoint evaluation"
 	@echo "  mlflow-ui  Start the local MLflow UI on port 5000"
 	@echo "  lint     Run ruff"
 	@echo "  format   Run black"
@@ -42,6 +47,15 @@ average-base:
 
 smoke:
 	python train.py --config-name smoke
+
+evaluate:
+	python -m src.evaluation.generate --config-name $(EVAL_CONFIG)
+
+evaluate-base:
+	python -m src.evaluation.generate --config-name evaluate_base
+
+evaluate-single:
+	python -m src.evaluation.generate --config-name evaluate_single
 
 mlflow-ui:
 	mlflow ui --backend-store-uri sqlite:///runs/mlflow/mlflow.db --port 5000

@@ -1,0 +1,19 @@
+# ============================================================
+# Base EN-DE evaluation configuration (Hydra)
+# ============================================================
+
+defaults:
+  - base_en_de
+  - _self_
+
+data:
+  test_jsonl: data/raw/wmt14_de_en/test.jsonl
+
+evaluation:
+  checkpoint: checkpoints/base_en_de/averaged.pt
+  output: results/newstest2014_base.txt
+  batch_size: 16
+  beam_size: 4
+  alpha: 0.6
+  max_len: 128
+  device: cuda
