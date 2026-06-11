@@ -37,8 +37,8 @@ download-data:
 	python scripts/download_data.py --output-dir data/raw/wmt14_de_en
 
 train-tokenizer:
-	@echo "Training shared BPE tokenizer (default 32k vocab, sample 10k lines)..."
-	python -m scripts.train_tokenizer --raw-dir data/raw/wmt14_de_en --output-dir data/processed/bpe --vocab-size 32000 --sample-size 0
+	@echo "Training shared BPE tokenizer (default 37k vocab, sample 10k lines)..."
+	python -m scripts.train_tokenizer --raw-dir data/raw/wmt14_de_en --output-dir data/processed/bpe --vocab-size 37000 --sample-size 0
  
 install:
 	python -m pip install -e '.[dev]'
