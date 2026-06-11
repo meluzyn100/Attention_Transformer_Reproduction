@@ -1,4 +1,3 @@
-
 import torch
 
 
@@ -20,10 +19,10 @@ def get_noam_scheduler(
     if lr_scale <= 0:
         raise ValueError("lr_scale must be positive")
 
-    factor = (d_model ** -0.5) * lr_scale
+    factor = (d_model**-0.5) * lr_scale
 
     def lr_lambda(step: int) -> float:
         step = max(1, int(step))
-        return factor * min(step ** -0.5, step * (warmup_steps ** -1.5))
+        return factor * min(step**-0.5, step * (warmup_steps**-1.5))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)

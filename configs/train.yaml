@@ -22,14 +22,14 @@ data:
   val_jsonl: data/raw/wmt14_de_en/validation.jsonl
   tokenizer_vocab: data/processed/bpe/bpe_vocab.json
   tokenizer_merges: data/processed/bpe/bpe_merges.txt
-  batch_size: 12
+  batch_size: 16
   num_workers: 4
   pin_memory: true
   persistent_workers: true
   multiprocessing_context: spawn
   prefetch_factor: 2
   # Optional: limit training set size (null = use all data)
-  max_train_samples: 500000
+  max_train_samples: null
 
 # ---- Optimizer --------------------------------------------
 optimizer:

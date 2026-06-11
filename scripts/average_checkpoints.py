@@ -9,7 +9,6 @@ from pathlib import Path
 
 import torch
 
-
 _STEP_RE = re.compile(r"step_(\d+)\.pt$")
 _EPOCH_RE = re.compile(r"epoch_(\d+)\.pt$")
 
@@ -32,7 +31,9 @@ def _extract_model_state(checkpoint: dict) -> dict[str, torch.Tensor]:
         return checkpoint["model"]
     if all(isinstance(key, str) for key in checkpoint.keys()):
         return checkpoint
-    raise ValueError("Unsupported checkpoint format: expected 'model' state_dict or raw state_dict")
+    raise ValueError(
+        "Unsupported checkpoint format: expected 'model' state_dict or raw state_dict"
+    )
 
 
 def _latest_checkpoints(checkpoint_dir: Path, n_last: int) -> list[Path]:
@@ -60,8 +61,7 @@ def average_checkpoints(input_paths: list[Path]) -> dict[str, torch.Tensor]:
             missing = sorted(base_keys - current_keys)
             extra = sorted(current_keys - base_keys)
             raise ValueError(
-                "Checkpoint keys mismatch: "
-                f"missing={missing[:5]} extra={extra[:5]}"
+                "Checkpoint keys mismatch: " f"missing={missing[:5]} extra={extra[:5]}"
             )
 
         for key, tensor in model_state.items():
@@ -122,7 +122,9 @@ def main() -> None:
         output_payload = dict(reference_payload)
         output_payload["model"] = averaged_model
         output_payload.setdefault("meta", {})
-        output_payload["meta"]["averaged_from"] = [str(path) for path in checkpoint_paths]
+        output_payload["meta"]["averaged_from"] = [
+            str(path) for path in checkpoint_paths
+        ]
     else:
         output_payload = averaged_model
 

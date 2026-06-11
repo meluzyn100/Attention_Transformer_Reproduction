@@ -4,7 +4,6 @@
 Writes `bpe_vocab.json` and `bpe_merges.txt` to the output directory.
 """
 
-
 import sys
 import argparse
 from pathlib import Path

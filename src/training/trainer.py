@@ -1,4 +1,3 @@
-
 import math
 import warnings
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from torch import nn
 import mlflow
 
 from src.data.dataset import create_src_mask, create_tgt_mask
+
 
 @dataclass
 class TrainerState:
@@ -40,7 +40,9 @@ class Trainer:
         self.grad_clip_norm = grad_clip_norm
         self.accum_steps = max(1, int(accum_steps))
         self._accum_counter = 0
-        self.use_amp = use_amp and self.device.type == "cuda" and torch.cuda.is_available()
+        self.use_amp = (
+            use_amp and self.device.type == "cuda" and torch.cuda.is_available()
+        )
         self.amp_dtype = self._resolve_amp_dtype(amp_dtype)
         self.use_grad_scaler = self.use_amp and self.amp_dtype == torch.float16
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_grad_scaler)
@@ -57,7 +59,9 @@ class Trainer:
             return torch.bfloat16 if bf16_supported else torch.float16
         if dtype in {"bf16", "bfloat16"}:
             if not bf16_supported:
-                warnings.warn("bf16 not supported, falling back to fp16", RuntimeWarning)
+                warnings.warn(
+                    "bf16 not supported, falling back to fp16", RuntimeWarning
+                )
                 return torch.float16
             return torch.bfloat16
         if dtype in {"fp16", "float16", "half"}:
@@ -85,10 +89,19 @@ class Trainer:
         if isinstance(batch, (list, tuple)) and len(batch) == 2:
             return batch[0], batch[1]
         if isinstance(batch, dict):
-            target_key = next((k for k in ("labels", "label", "target", "targets", "y") if k in batch), None)
+            target_key = next(
+                (
+                    k
+                    for k in ("labels", "label", "target", "targets", "y")
+                    if k in batch
+                ),
+                None,
+            )
             if target_key is None:
                 raise KeyError("batch dict missing target key (labels, target, etc.)")
-            return {k: v for k, v in batch.items() if k != target_key}, batch[target_key]
+            return {k: v for k, v in batch.items() if k != target_key}, batch[
+                target_key
+            ]
         raise TypeError("batch must be tuple(input, target) or dict with target key")
 
     def _extract_logits(self, model_output: Any) -> torch.Tensor:
@@ -98,7 +111,9 @@ class Trainer:
             for key in ("logits", "output", "outputs"):
                 if key in model_output and isinstance(model_output[key], torch.Tensor):
                     return model_output[key]
-        if isinstance(model_output, (tuple, list)) and isinstance(model_output[0], torch.Tensor):
+        if isinstance(model_output, (tuple, list)) and isinstance(
+            model_output[0], torch.Tensor
+        ):
             return model_output[0]
         raise TypeError(f"could not extract logits from {type(model_output)}")
 
@@ -126,7 +141,7 @@ class Trainer:
             if p.grad is not None:
                 total_norm_sq += p.grad.detach().norm(2).square().item()
 
-        return total_norm_sq ** 0.5
+        return total_norm_sq**0.5
 
     def _current_lr(self) -> float:
         return self.optimizer.param_groups[0]["lr"]
@@ -232,7 +247,9 @@ class Trainer:
         payload = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
+            "scheduler": (
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
             "state": {
                 "global_step": self.state.global_step,
                 "epoch": self.state.epoch,
@@ -240,7 +257,9 @@ class Trainer:
         }
         torch.save(payload, path)
 
-    def load_checkpoint(self, path: str | Path, map_location: str | None = None) -> None:
+    def load_checkpoint(
+        self, path: str | Path, map_location: str | None = None
+    ) -> None:
         checkpoint = torch.load(path, map_location=map_location or str(self.device))
         self.model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
@@ -262,7 +281,9 @@ class TranslationTrainer(Trainer):
             src = batch.get("src") or batch.get("source")
             tgt = batch.get("tgt") or batch.get("target") or batch.get("labels")
             if src is None or tgt is None:
-                raise KeyError("Batch dict must contain 'src'/'source' and 'tgt'/'target' keys")
+                raise KeyError(
+                    "Batch dict must contain 'src'/'source' and 'tgt'/'target' keys"
+                )
             return src, tgt
         raise TypeError(
             f"Unsupported batch type {type(batch)}. "

@@ -7,6 +7,9 @@ defaults:
   - _self_
 
 # Reproduction hyperparameters (requested)
+max_train_samples: 250000
+max_steps: 100000
+
 d_model: 512
 n_layers: 6
 heads: 8
@@ -14,9 +17,8 @@ d_ff: 2048
 dropout: 0.1
 label_smoothing: 0.1
 batch_size_tokens: 25000
-warmup_steps: 20000
-max_steps: 100000
 adam_beta2: 0.98
+warmup_steps: 4000
 
 # Approximate 25k-token effective batch on smaller hardware.
 batch_tokens: 4096
@@ -44,7 +46,7 @@ training:
   label_smoothing: ${label_smoothing}
   max_steps: ${max_steps}
   accum_steps: ${accum_steps}
-  checkpoint_dir: checkpoints/base_en_de
+  checkpoint_dir: checkpoints/base_en_de_v1
   checkpoint_every_steps: 5000
   skip_backoff_trigger: 20
   skip_backoff_factor: 0.5
@@ -54,3 +56,4 @@ data:
   # The current dataloader batches by examples; keep token counts for experiment tracking.
   batch_size_tokens: ${batch_size_tokens}
   batch_tokens: ${batch_tokens}
+  max_train_samples: ${max_train_samples}
